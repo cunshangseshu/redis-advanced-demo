@@ -1,5 +1,6 @@
 package com.cunshang.redisadvanced.controller;
 
+import com.cunshang.redisadvanced.common.ApiResponse;
 import com.cunshang.redisadvanced.service.RedisFoundationService;
 
 import org.springframework.web.bind.annotation.*;
@@ -15,7 +16,6 @@ public class RedisFoundationController {
         this.redisService = redisService;
     }
 
-
     /**
      * SET
      * <p>
@@ -28,85 +28,101 @@ public class RedisFoundationController {
      * value=cunshang
      */
     @PostMapping("/string")
-    public String set(@RequestParam String key, @RequestParam String value) {
+    public ApiResponse<Void> set(
+            @RequestParam String key,
+            @RequestParam String value
+    ) {
         redisService.set(key, value);
-        return "OK";
-
+        //return "OK";
+        return ApiResponse.success();
     }
-
 
     /**
      * GET
      */
     @GetMapping("/string")
-    public String get(@RequestParam String key) {
-        return redisService.get(key);
+    public ApiResponse<String> get(@RequestParam String key) {
+        //return redisService.get(key);
+        return ApiResponse.success(redisService.get(key));
     }
-
 
     /**
      * SET + TTL
      */
     @PostMapping("/string/ttl")
-    public String setWithTtl(@RequestParam String key, @RequestParam String value, @RequestParam long seconds) {
+    public ApiResponse<Void> setWithTtl(
+            @RequestParam String key,
+            @RequestParam String value,
+            @RequestParam long seconds
+    ) {
+        /*redisService.setWithTtl(key, value, seconds);
+        return "OK";*/
+        if (seconds <= 0) throw new IllegalArgumentException("你个人才，设置 0 秒？！意义何在啊；");
         redisService.setWithTtl(key, value, seconds);
-        return "OK";
+        return ApiResponse.success();
     }
-
 
     /**
      * INCR
      */
     @PostMapping("/counter/increment")
-    public Long increment(@RequestParam String key) {
-        return redisService.increment(key);
+    public ApiResponse<Long> increment(@RequestParam String key) {
+        // return redisService.increment(key);
+        return ApiResponse.success(redisService.increment(key));
     }
-
 
     /**
      * TTL
      */
     @GetMapping("/ttl")
-    public Long ttl(@RequestParam String key) {
-        return redisService.ttl(key);
+    public ApiResponse<Long> ttl(@RequestParam String key) {
+        // return redisService.ttl(key);
+        return ApiResponse.success(redisService.ttl(key));
     }
-
 
     /**
      * DEL
      */
     @DeleteMapping("/key")
-    public Boolean delete(@RequestParam String key) {
-        return redisService.delete(key);
+    public ApiResponse<Boolean> delete(@RequestParam String key) {
+        // return redisService.delete(key);
+        return ApiResponse.success(redisService.delete(key));
     }
 
     /**
      * Hash - HSET
      */
     @PostMapping("/hash")
-    public String hashSet(@RequestParam String key, @RequestParam String field, @RequestParam String value) {
+    public ApiResponse<Void> hashSet(
+            @RequestParam String key,
+            @RequestParam String field,
+            @RequestParam String value
+    ) {
         redisService.hashSet(key, field, value);
-        return "OK";
+        // return "OK";
+        return ApiResponse.success();
     }
-
 
     /**
      * Hash - HGET
      */
     @GetMapping("/hash")
-    public Object hashGet(@RequestParam String key, @RequestParam String field) {
-        return redisService.hashGet(key, field);
+    public ApiResponse<Object> hashGet(
+            @RequestParam String key,
+            @RequestParam String field
+    ) {
+        //return redisService.hashGet(key, field);
+        return ApiResponse.success(redisService.hashGet(key, field));
     }
-
 
     /**
      * Hash - HGETALL
      */
     @GetMapping("/hash/all")
-    public Map<Object, Object> hashGetAll(@RequestParam String key) {
-        return redisService.hashGetAll(key);
+    public ApiResponse<Map<Object, Object>> hashGetAll(@RequestParam String key) {
+        //return redisService.hashGetAll(key);
+        return ApiResponse.success(redisService.hashGetAll(key));
     }
-
 
     /**
      * Hash - HDEL

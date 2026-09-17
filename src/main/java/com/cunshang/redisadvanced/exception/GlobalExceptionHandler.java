@@ -33,11 +33,26 @@ public class GlobalExceptionHandler {
     }
 
     @ExceptionHandler(RedisSystemException.class)
-    public ResponseEntity<ApiResponse<Void>> handleRedisSystemException() {
+    public ResponseEntity<ApiResponse<Void>> handleRedisSystemException(RedisSystemException e) {
+        if (isWrongType(e)) {
+            return ResponseEntity
+                    .status(ResultCode.REDIS_KEY_TYPE_CONFLICT.getHttpStatus())
+                    .body(ApiResponse.fail(ResultCode.REDIS_KEY_TYPE_CONFLICT));
+        }
         return ResponseEntity
                 .internalServerError()
                 .body(ApiResponse.fail(ResultCode.INTERNAL_SERVER_ERROR));
     }
+    private boolean isWrongType(Throwable e) {
+    while (e != null) {
+        String message = e.getMessage();
+        if (message != null && message.contains("WRONGTYPE")) {
+            return true;
+        }
+        e = e.getCause();
+    }
+    return false;
+}
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiResponse<Void>> handleException(Exception e) {
