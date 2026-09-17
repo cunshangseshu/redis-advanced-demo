@@ -278,4 +278,112 @@ public class RedisFoundationService {
         return redisTemplate.opsForSet().difference(key1, key2);
     }
 
+    //  Set 类型========================================================================
+    //  特点：不重复元素 + 每个元素有一个 score + 按 score 排序
+    //  游戏积分排行榜、文章热度榜、直播排行榜、销售、用户贡献榜
+
+    /**
+     * 向 ZSet 添加元素及分数。
+     * 对应 Redis：ZADD key score member
+     *
+     * @return 新增成功返回 true；
+     * 已存在的 member 更新 score 时通常返回 false
+     * <p>
+     * 此功能对应的真实业务可以：
+     * → 用户获得初始积分
+     * → 商品加入销量榜
+     * → 文章加入热度榜
+     */
+    public Boolean zSetAdd(String key, String member, double score) {
+        return redisTemplate.opsForZSet().add(key, member, score);
+    }
+
+
+    /**
+     * 按 score 从低到高获取元素。
+     * 对应 Redis：ZRANGE key start end
+     *
+     */
+    public Set<String> zSetRange(String key, long start, long end) {
+        return redisTemplate.opsForZSet().range(key, start, end);
+    }
+
+
+    /**
+     * 按 score 从高到低获取元素(reserveRange <-> range 两极反转~~~)。
+     * <p>
+     * 适合排行榜场景。
+     */
+    public Set<String> zSetReverseRange(String key, long start, long end) {
+        return redisTemplate.opsForZSet().reverseRange(key, start, end);
+    }
+
+
+    /**
+     * 获取指定 member 的 score。
+     * 对应 Redis：ZSCORE key member
+     * <p>
+     * member 不存在时返回 null。
+     */
+    public Double zSetScore(String key, String member) {
+        return redisTemplate.opsForZSet().score(key, member);
+    }
+
+
+    /**
+     * 增加指定 member 的 score。
+     * 对应 Redis：ZINCRBY key increment member
+     *
+     * @return 修改后的新 score
+     */
+    public Double zSetIncrementScore(
+            String key,
+            String member,
+            double increment
+    ) {
+        return redisTemplate.opsForZSet()
+                .incrementScore(key, member, increment);
+    }
+
+
+    /**
+     * 获取指定 member 的正序排名。
+     * <p>
+     * 排名从 0 开始。
+     */
+    public Long zSetRank(String key, String member) {
+        return redisTemplate.opsForZSet().rank(key, member);
+    }
+
+
+    /**
+     * 获取 member 的倒序排名。
+     * <p>
+     * score 越高，排名越靠前。
+     * 排名从 0 开始。
+     */
+    public Long zSetReverseRank(String key, String member) {
+        return redisTemplate.opsForZSet().reverseRank(key, member);
+    }
+
+
+    /**
+     * 删除 ZSet 中的元素。
+     * 对应 Redis：ZREM key member
+     */
+    public Long zSetRemove(String key, String member) {
+        return redisTemplate.opsForZSet().remove(key, member);
+    }
+
+
+    /**
+     * 获取 ZSet 元素数量。
+     * 对应 Redis：ZCARD key
+     */
+    public long zSetSize(String key) {
+        Long size = redisTemplate.opsForZSet().size(key);
+        return size == null ? 0L : size;
+    }
+
+
 }

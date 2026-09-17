@@ -318,4 +318,149 @@ public class RedisFoundationController {
     ) {
         return ApiResponse.success(redisService.setDifference(key1, key2));
     }
+
+    //  Set 类型========================================================================
+
+    /**
+     * 向 ZSet 添加元素及分数。
+     * 对应 Redis：ZADD key score member
+     * <p>
+     * 真实场景：
+     * 用户加入积分榜、商品加入销量榜。
+     * !!!很重要的一点：ZADD 对已存在 member 可以更新 score，返回值不一定代表操作失败。
+     */
+    @PostMapping("/zset")
+    public ApiResponse<Boolean> zSetAdd(
+            @RequestParam String key,
+            @RequestParam String member,
+            @RequestParam double score
+    ) {
+        return ApiResponse.success(redisService.zSetAdd(key, member, score));
+    }
+
+    /**
+     * 按 score 从低到高查询。
+     * 对应 Redis：ZRANGE key start end
+     * <p>
+     * 真实场景：
+     * 查询最低积分区间、低分段用户。
+     */
+    @GetMapping("/zset")
+    public ApiResponse<Set<String>> zSetRange(
+            @RequestParam String key,
+            @RequestParam(defaultValue = "0") long start,
+            @RequestParam(defaultValue = "-1") long end
+    ) {
+        return ApiResponse.success(redisService.zSetRange(key, start, end));
+    }
+
+
+    /**
+     * 按 score 从高到低查询，
+     * 下表从0开始相当于1。
+     * <p>
+     * 真实场景：
+     * 游戏排行榜、热度榜 Top ***。
+     */
+    @GetMapping("/zset/reverse")
+    public ApiResponse<Set<String>> zSetReverseRange(
+            @RequestParam String key,
+            @RequestParam(defaultValue = "0") long start,
+            @RequestParam(defaultValue = "-1") long end
+    ) {
+        return ApiResponse.success(redisService.zSetReverseRange(key, start, end));
+    }
+
+
+    /**
+     * 查询指定 member 的 score。
+     * 对应 Redis：ZSCORE key member
+     * <p>
+     * 真实场景：
+     * 查询用户当前积分。
+     */
+    @GetMapping("/zset/score")
+    public ApiResponse<Double> zSetScore(
+            @RequestParam String key,
+            @RequestParam String member
+    ) {
+        return ApiResponse.success(redisService.zSetScore(key, member));
+    }
+
+
+    /**
+     * 增加指定 member 的 score。
+     * 对应 Redis：ZINCRBY key increment member
+     * <p>
+     * 真实场景：
+     * 游戏胜利积分 +10、文章热度 +1。
+     */
+    @PostMapping("/zset/score/increment")
+    public ApiResponse<Double> zSetIncrementScore(
+            @RequestParam String key,
+            @RequestParam String member,
+            @RequestParam double increment
+    ) {
+        return ApiResponse.success(redisService.zSetIncrementScore(key, member, increment));
+    }
+
+
+    /**
+     * 查询正序排名。
+     * <p>
+     * Redis 排名从 0 开始。
+     */
+    @GetMapping("/zset/rank")
+    public ApiResponse<Long> zSetRank(
+            @RequestParam String key,
+            @RequestParam String member
+    ) {
+        return ApiResponse.success(redisService.zSetRank(key, member));
+    }
+
+
+    /**
+     * 查询倒序排名。
+     * <p>
+     * score 越高排名越靠前。
+     * Redis 排名从 0 开始。
+     * <p>
+     * 真实场景：
+     * 查询“我在排行榜第几名”。
+     */
+    @GetMapping("/zset/reverse-rank")
+    public ApiResponse<Long> zSetReverseRank(
+            @RequestParam String key,
+            @RequestParam String member
+    ) {
+        return ApiResponse.success(redisService.zSetReverseRank(key, member));
+    }
+
+
+    /**
+     * 删除 ZSet 中的元素。
+     * 对应 Redis：ZREM key member
+     * <p>
+     * 真实场景：
+     * 用户退出排行榜、榜单移除商品。
+     */
+    @DeleteMapping("/zset")
+    public ApiResponse<Long> zSetRemove(
+            @RequestParam String key,
+            @RequestParam String member
+    ) {
+        return ApiResponse.success(redisService.zSetRemove(key, member));
+    }
+
+
+    /**
+     * 获取 ZSet 元素数量。
+     * 对应 Redis：ZCARD key
+     */
+    @GetMapping("/zset/size")
+    public ApiResponse<Long> zSetSize(
+            @RequestParam String key
+    ) {
+        return ApiResponse.success(redisService.zSetSize(key));
+    }
 }
