@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: redis-advanced-demo
+  data:
+    redis:
+      host: localhost
+      port: 6380
+      timeout: 3s
+server:
+  port: 8080
+management:
+  endpoints:
+    web:
+      exposure:
+        include:
+          - health
+          - info
