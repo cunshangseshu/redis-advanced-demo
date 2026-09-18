@@ -1,6 +1,7 @@
 package com.cunshang.redisadvanced.controller;
 
 import com.cunshang.redisadvanced.common.ApiResponse;
+import com.cunshang.redisadvanced.model.RedisUserProfile;
 import com.cunshang.redisadvanced.service.RedisFoundationService;
 
 import org.springframework.data.geo.Point;
@@ -559,5 +560,30 @@ public class RedisFoundationController {
     @GetMapping("/stream/size")
     public ApiResponse<Long> streamSize(@RequestParam String key) {
         return ApiResponse.success(redisService.streamSize(key));
+    }
+
+
+    // 序列化 && 反序列化 ========================================================================
+
+
+    /**
+     * 将 Java 对象序列化为 JSON 后写入 Redis。
+     */
+    @PostMapping("/object")
+    public ApiResponse<Void> objectSet(
+            @RequestParam String key,
+            @RequestBody RedisUserProfile profile
+    ) {
+        redisService.objectSet(key, profile);
+        return ApiResponse.success();
+    }
+
+
+    /**
+     * 从 Redis 读取 JSON，并反序列化为 Java 对象。
+     */
+    @GetMapping("/object")
+    public ApiResponse<RedisUserProfile> objectGet(@RequestParam String key) {
+        return ApiResponse.success(redisService.objectGet(key));
     }
 }

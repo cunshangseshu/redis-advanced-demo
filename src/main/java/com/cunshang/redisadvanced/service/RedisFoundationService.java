@@ -1,5 +1,8 @@
 package com.cunshang.redisadvanced.service;
 
+import com.cunshang.redisadvanced.model.RedisUserProfile;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.data.domain.Range;
 import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.connection.stream.RecordId;
@@ -23,9 +26,38 @@ import java.util.Set;
 public class RedisFoundationService {
 
     private final StringRedisTemplate redisTemplate;
+    private final ObjectMapper objectMapper;
 
-    public RedisFoundationService(StringRedisTemplate redisTemplate) {
+    public RedisFoundationService(StringRedisTemplate redisTemplate, ObjectMapper objectMapper) {
         this.redisTemplate = redisTemplate;
+        this.objectMapper = objectMapper;
+    }
+
+    /**
+     * 将 Java 对象  !!!"序列化"!!!  为 JSON 后写入 Redis。
+     */
+    public void objectSet(String key, RedisUserProfile profile) {
+        try {
+            String json = objectMapper.writeValueAsString(profile);
+            redisTemplate.opsForValue().set(key, json);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Redis 对象序列化失败", e);
+        }
+    }
+
+    /**
+     * 从 Redis 获取 JSON，并  !!!"反序列化"!!!  为 Java 对象。
+     */
+    public RedisUserProfile objectGet(String key) {
+        String json = redisTemplate.opsForValue().get(key);
+        if (json == null) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(json, RedisUserProfile.class);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Redis 对象反序列化失败", e);
+        }
     }
 
     // String 类型========================================================================

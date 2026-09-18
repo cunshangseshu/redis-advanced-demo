@@ -38,6 +38,8 @@ redis-advanced-demo
 │       │   ├── exception
 │       │   │   ├── BusinessException.java
 │       │   │   └── GlobalExceptionHandler.java
+│       │   ├── model
+│       │   │   └── RedisUserProfile.java
 │       │   └── service
 │       │       └── RedisFoundationService.java
 │       └── resources
@@ -123,6 +125,7 @@ Actuator 当前开放：
 | HyperLogLog | ✅ |
 | GEO | ✅ |
 | Stream | ✅ |
+| Spring Boot Redis 对象存储与序列化 | ✅ |
 | Cache Aside | ⏳ |
 | 缓存穿透 / 击穿 / 雪崩 | ⏳ |
 | Redis + MySQL 缓存一致性 | ⏳ |
@@ -1254,6 +1257,188 @@ Stream
 
 ---
 
+
+# Redis 对象存储与序列化
+
+## 特点
+
+Java 业务代码中经常需要缓存一个完整对象，而 Redis 本身并不直接理解 Java 对象。
+
+当前项目采用：
+
+```text
+Java Object
+↓
+ObjectMapper
+↓
+JSON String
+↓
+Redis
+```
+
+读取时执行相反过程：
+
+```text
+Redis JSON
+↓
+ObjectMapper
+↓
+Java Object
+```
+
+当前实现使用：
+
+```text
+RedisUserProfile
+ObjectMapper
+StringRedisTemplate / ValueOperations
+```
+
+用于直观验证 Java 对象、JSON 与 Redis 存储之间的关系。
+
+## 已实现对象
+
+当前新增：
+
+```java
+public record RedisUserProfile(
+        Long id,
+        String username,
+        Integer age
+) {
+}
+```
+
+## 已实现功能
+
+| 能力 | Service 方法 | 功能 |
+|---|---|---|
+| 对象序列化 | `objectSet()` | 将 Java 对象转换为 JSON 并写入 Redis |
+| 对象反序列化 | `objectGet()` | 从 Redis 获取 JSON 并转换回 Java 对象 |
+
+## 核心代码
+
+```java
+public void objectSet(
+        String key,
+        RedisUserProfile profile
+) {
+    try {
+        String json =
+                objectMapper.writeValueAsString(profile);
+
+        redisTemplate.opsForValue()
+                .set(key, json);
+
+    } catch (JsonProcessingException e) {
+        throw new IllegalStateException(
+                "Redis 对象序列化失败",
+                e
+        );
+    }
+}
+```
+
+```java
+public RedisUserProfile objectGet(
+        String key
+) {
+    String json = redisTemplate.opsForValue()
+            .get(key);
+
+    if (json == null) {
+        return null;
+    }
+
+    try {
+        return objectMapper.readValue(
+                json,
+                RedisUserProfile.class
+        );
+
+    } catch (JsonProcessingException e) {
+        throw new IllegalStateException(
+                "Redis 对象反序列化失败",
+                e
+        );
+    }
+}
+```
+
+## Controller 接口
+
+写入对象：
+
+```text
+POST /api/redis/object
+```
+
+其中：
+
+```text
+key
+→ RequestParam
+
+RedisUserProfile
+→ RequestBody
+```
+
+读取对象：
+
+```text
+GET /api/redis/object
+```
+
+## 已验证内容
+
+测试 Key：
+
+```text
+demo:object:user:1001
+```
+
+已完成：
+
+```text
+Java 对象序列化为 JSON
+JSON 写入 Redis
+通过 redis-cli 直接查看 Redis 中的 JSON
+从 Redis 读取 JSON
+JSON 反序列化为 RedisUserProfile
+Controller 返回反序列化后的对象
+手动修改 Redis JSON 后再次完成反序列化
+```
+
+Redis 中实际可看到类似：
+
+```json
+{"id":1001,"username":"cunshang","age":24}
+```
+
+这说明当前 Redis 中存储的是 JSON 字符串，而不是 Java 对象本身。
+
+## 可应用场景（示例）
+
+- 用户详情缓存
+- 商品详情缓存
+- 文章详情缓存
+- 订单摘要缓存
+- 系统配置缓存
+
+> 当前项目只实现并验证了“Java 对象 ↔ JSON ↔ Redis”的基础能力，上述内容属于可应用方向示例，并非已经实现的完整缓存业务。
+
+## 注意事项
+
+- Redis 不认识 Java 对象，必须经过序列化后才能存储。
+- 当前实现明确使用 JSON，方便通过 `redis-cli` 直接观察数据。
+- `ObjectMapper.writeValueAsString()` 负责序列化。
+- `ObjectMapper.readValue()` 负责反序列化。
+- JSON 字段需要能够正确映射到目标 Java 类型。
+- 当前只实现基础对象存取，尚未引入统一 RedisTemplate 序列化配置、泛型对象处理、版本兼容策略等进一步内容。
+- 这一能力会作为后续 Cache Aside 与 Redis + MySQL 缓存学习的基础。
+
+---
+
 # 当前 Controller API
 
 统一前缀：
@@ -1308,6 +1493,8 @@ Stream
 
 /stream
 /stream/size
+
+/object
 ```
 
 ---
@@ -1348,22 +1535,21 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. Spring Boot Redis 序列化与对象存储
-2. Pipeline / 批量操作
-3. Cache Aside
-4. 缓存穿透、击穿、雪崩
-5. Redis + MySQL 缓存一致性
-6. TTL 与内存淘汰策略
-7. 分布式锁
-8. Lua
-9. MULTI / EXEC / WATCH
-10. RDB / AOF
-11. 主从复制
-12. Sentinel
-13. Redis Cluster
-14. Hot Key / Big Key / Slowlog
-15. ACL、连接池、超时、重试、监控
-16. Spring Boot 日志规范、SLF4J、Logback、AOP 请求链路日志
+1. Pipeline / 批量操作
+2. Cache Aside
+3. 缓存穿透、击穿、雪崩
+4. Redis + MySQL 缓存一致性
+5. TTL 与内存淘汰策略
+6. 分布式锁
+7. Lua
+8. MULTI / EXEC / WATCH
+9. RDB / AOF
+10. 主从复制
+11. Sentinel
+12. Redis Cluster
+13. Hot Key / Big Key / Slowlog
+14. ACL、连接池、超时、重试、监控
+15. Spring Boot 日志规范、SLF4J、Logback、AOP 请求链路日志
 
 ---
 
