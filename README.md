@@ -119,8 +119,8 @@ Actuator 当前开放：
 | HTTP / 业务状态码 | ✅ |
 | 全局异常处理 | ✅ |
 | WRONGTYPE 类型冲突处理 | ✅ |
-| Bitmap | ⏳ |
-| HyperLogLog | ⏳ |
+| Bitmap | ✅ |
+| HyperLogLog | ✅ |
 | GEO | ⏳ |
 | Stream | ⏳ |
 | Cache Aside | ⏳ |
@@ -670,6 +670,210 @@ demo:zset:game:ranking
 
 ---
 
+
+# Redis Bitmap
+
+## 特点
+
+Bitmap 可以把一个 String 中的每一个 bit 位作为布尔状态使用：
+
+```text
+0 -> false
+1 -> true
+```
+
+本质上仍然基于 Redis String，只是通过 bit 位进行读写和统计。
+
+Spring Data Redis：
+
+```java
+redisTemplate.opsForValue()
+```
+
+其中 `BITCOUNT` 当前通过底层 Redis Connection 调用。
+
+## 已实现功能
+
+| Redis 命令 | Service 方法 | 功能 |
+|---|---|---|
+| SETBIT | `bitmapSet()` | 设置指定 bit 位 |
+| GETBIT | `bitmapGet()` | 查询指定 bit 位 |
+| BITCOUNT | `bitmapCount()` | 统计值为 1 的 bit 数量 |
+
+## 核心代码
+
+```java
+public Boolean bitmapSet(String key, long offset, boolean value) {
+    return redisTemplate.opsForValue()
+            .setBit(key, offset, value);
+}
+
+public Boolean bitmapGet(String key, long offset) {
+    return redisTemplate.opsForValue()
+            .getBit(key, offset);
+}
+
+public long bitmapCount(String key) {
+    byte[] rawKey = redisTemplate
+            .getStringSerializer()
+            .serialize(key);
+
+    if (rawKey == null) {
+        return 0L;
+    }
+
+    Long count = redisTemplate.execute(
+            (RedisCallback<Long>) connection ->
+                    connection.stringCommands().bitCount(rawKey)
+    );
+
+    return count == null ? 0L : count;
+}
+```
+
+## 可应用场景（示例）
+
+- 用户签到状态
+- 用户在线 / 离线状态
+- 活动参与状态
+- 大量布尔状态记录
+- 功能开关或某类状态标记
+
+> 当前项目只实现并验证了 Bitmap 基础操作，上述内容是可应用方向示例，并非已经实现的完整业务系统。
+
+## 已验证内容
+
+```text
+SETBIT
+GETBIT
+BITCOUNT
+SETBIT 返回旧值的行为
+offset 与业务含义的映射方式
+```
+
+## 注意事项
+
+- Bitmap 的 `offset` 只是 bit 位下标，Redis 本身不知道它代表日期、用户或其他业务含义。
+- `SETBIT` 返回的是该 bit 位修改之前的旧值，不是“操作是否成功”。
+- 没有设置过的 bit 位默认为 `0 / false`。
+- `BITCOUNT` 统计的是当前 Key 中值为 `1` 的 bit 数量。
+- Bitmap 适合大量布尔状态场景，但业务层需要自行定义 offset 映射规则。
+
+---
+
+# Redis HyperLogLog
+
+## 特点
+
+HyperLogLog 用于进行近似去重计数，主要回答：
+
+```text
+有多少个不同元素？
+```
+
+而不是保存并返回全部具体成员。
+
+Spring Data Redis：
+
+```java
+redisTemplate.opsForHyperLogLog()
+```
+
+## 已实现功能
+
+| Redis 命令 | Service 方法 | 功能 |
+|---|---|---|
+| PFADD | `hyperLogLogAdd()` | 添加统计元素 |
+| PFCOUNT | `hyperLogLogCount()` | 获取近似去重数量 |
+| PFMERGE | `hyperLogLogMerge()` | 合并多个 HyperLogLog |
+
+## 核心代码
+
+```java
+public Long hyperLogLogAdd(String key, String value) {
+    return redisTemplate.opsForHyperLogLog()
+            .add(key, value);
+}
+
+public long hyperLogLogCount(String key) {
+    Long count = redisTemplate.opsForHyperLogLog()
+            .size(key);
+
+    return count == null ? 0L : count;
+}
+
+public Long hyperLogLogMerge(
+        String destinationKey,
+        String... sourceKeys
+) {
+    return redisTemplate.opsForHyperLogLog()
+            .union(destinationKey, sourceKeys);
+}
+```
+
+## 可应用场景（示例）
+
+- 网站 / 页面 UV
+- 独立访问用户数
+- 独立设备数
+- 活动独立参与人数
+- 某功能的独立使用人数
+- 多天或多个统计周期的去重汇总
+
+> 当前项目只实现并验证了 HyperLogLog 基础能力，上述内容是可应用方向示例，并非已经实现的数据分析系统。
+
+## 已验证内容
+
+测试 Key：
+
+```text
+demo:hll:uv:day1
+demo:hll:uv:day2
+demo:hll:uv:total
+```
+
+验证：
+
+```text
+PFADD
+重复元素去重统计
+PFCOUNT
+PFMERGE
+跨 Key 合并后的去重统计
+```
+
+示例验证结果：
+
+```text
+day1 独立元素 ≈ 3
+day2 独立元素 ≈ 4
+合并后独立元素 ≈ 5
+```
+
+说明多个 HyperLogLog 合并后统计的是联合后的近似基数，而不是简单相加。
+
+## HyperLogLog 与 Set
+
+```text
+Set
+-> 精确去重
+-> 可以获取具体有哪些 member
+
+HyperLogLog
+-> 近似去重计数
+-> 主要回答“有多少个不同元素”
+```
+
+## 注意事项
+
+- HyperLogLog 是近似基数统计，不保证绝对精确。
+- 小规模测试数据经常会得到与精确值一致的结果，但不能因此把它当作精确 Set。
+- HyperLogLog 不能像 Set 一样获取完整成员列表。
+- 重复 `PFADD` 同一个元素不会按多个独立元素计数。
+- `PFMERGE` 可合并多个 HyperLogLog，再对合并结果执行 `PFCOUNT`。
+
+---
+
 # 当前 Controller API
 
 统一前缀：
@@ -709,6 +913,13 @@ demo:zset:game:ranking
 /zset/rank
 /zset/reverse-rank
 /zset/size
+
+/bitmap
+/bitmap/count
+
+/hyperloglog
+/hyperloglog/count
+/hyperloglog/merge
 ```
 
 ---
@@ -749,26 +960,24 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. Bitmap
-2. HyperLogLog
-3. GEO
-4. Stream
-5. Spring Boot Redis 序列化与对象存储
-6. Pipeline / 批量操作
-7. Cache Aside
-8. 缓存穿透、击穿、雪崩
-9. Redis + MySQL 缓存一致性
-10. TTL 与内存淘汰策略
-11. 分布式锁
-12. Lua
-13. MULTI / EXEC / WATCH
-14. RDB / AOF
-15. 主从复制
-16. Sentinel
-17. Redis Cluster
-18. Hot Key / Big Key / Slowlog
-19. ACL、连接池、超时、重试、监控
-20. Spring Boot 日志规范、SLF4J、Logback、AOP 请求链路日志
+1. GEO
+2. Stream
+3. Spring Boot Redis 序列化与对象存储
+4. Pipeline / 批量操作
+5. Cache Aside
+6. 缓存穿透、击穿、雪崩
+7. Redis + MySQL 缓存一致性
+8. TTL 与内存淘汰策略
+9. 分布式锁
+10. Lua
+11. MULTI / EXEC / WATCH
+12. RDB / AOF
+13. 主从复制
+14. Sentinel
+15. Redis Cluster
+16. Hot Key / Big Key / Slowlog
+17. ACL、连接池、超时、重试、监控
+18. Spring Boot 日志规范、SLF4J、Logback、AOP 请求链路日志
 
 ---
 

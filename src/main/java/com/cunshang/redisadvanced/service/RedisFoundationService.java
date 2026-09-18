@@ -403,4 +403,37 @@ public class RedisFoundationService {
         return count == null ? 0L : count;
     }
 
+
+    // HyperLogLog 类型========================================================================
+
+    /**
+     * 向 HyperLogLog 添加元素。
+     * 对应 Redis：PFADD key element
+     *
+     * @return HyperLogLog 内部状态发生变化时通常返回 1，否则返回 0
+     */
+    public Long hyperLogLogAdd(String key, String value) {
+        return redisTemplate.opsForHyperLogLog().add(key, value);
+    }
+
+    /**
+     * 获取 HyperLogLog 的近似去重数量。
+     * 对应 Redis：PFCOUNT key
+     */
+    public long hyperLogLogCount(String key) {
+        Long count = redisTemplate.opsForHyperLogLog().size(key);
+        return count == null ? 0L : count;
+    }
+
+    /**
+     * 合并多个 HyperLogLog。
+     * 对应 Redis：PFMERGE destination source...
+     *
+     * @return 合并后的近似去重数量；
+     * 大概应用场景：
+     * → 合并多个统计周期
+     */
+    public Long hyperLogLogMerge(String destinationKey, String... sourceKeys) {
+        return redisTemplate.opsForHyperLogLog().union(destinationKey, sourceKeys);
+    }
 }

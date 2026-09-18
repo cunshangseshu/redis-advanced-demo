@@ -431,4 +431,41 @@ public class RedisFoundationController {
         return ApiResponse.success(redisService.bitmapCount(key));
     }
 
+
+    // HyperLogLog 类型========================================================================
+
+    /**
+     * 向 HyperLogLog 添加元素。
+     * 对应 Redis：PFADD key element
+     * <p>
+     * 可应用于：
+     * UV、独立设备数等去重计数场景。
+     */
+    @PostMapping("/hyperloglog")
+    public ApiResponse<Long> hyperLogLogAdd(@RequestParam String key, @RequestParam String value) {
+        return ApiResponse.success(redisService.hyperLogLogAdd(key, value));
+    }
+
+
+    /**
+     * 获取 HyperLogLog 的近似去重数量。
+     * 对应 Redis：PFCOUNT key
+     */
+    @GetMapping("/hyperloglog/count")
+    public ApiResponse<Long> hyperLogLogCount(@RequestParam String key) {
+        return ApiResponse.success(redisService.hyperLogLogCount(key));
+    }
+
+
+    /**
+     * 合并多个 HyperLogLog。
+     * 对应 Redis：PFMERGE destination source...
+     * <p>
+     * 可应用于：
+     * 多天 UV 合并、多个统计周期合并。
+     */
+    @PostMapping("/hyperloglog/merge")
+    public ApiResponse<Long> hyperLogLogMerge(@RequestParam String destinationKey, @RequestParam String[] sourceKeys) {
+        return ApiResponse.success(redisService.hyperLogLogMerge(destinationKey, sourceKeys));
+    }
 }
