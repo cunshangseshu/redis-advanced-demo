@@ -3,6 +3,7 @@ package com.cunshang.redisadvanced.controller;
 import com.cunshang.redisadvanced.common.ApiResponse;
 import com.cunshang.redisadvanced.service.RedisFoundationService;
 
+import org.springframework.data.geo.Point;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -467,5 +468,68 @@ public class RedisFoundationController {
     @PostMapping("/hyperloglog/merge")
     public ApiResponse<Long> hyperLogLogMerge(@RequestParam String destinationKey, @RequestParam String[] sourceKeys) {
         return ApiResponse.success(redisService.hyperLogLogMerge(destinationKey, sourceKeys));
+    }
+
+
+    // GEO 类型========================================================================
+
+
+    /**
+     * 添加 GEO 成员及经纬度。
+     * 对应 Redis：GEOADD
+     */
+    @PostMapping("/geo")
+    public ApiResponse<Long> geoAdd(@RequestParam String key, @RequestParam String member, @RequestParam double longitude, @RequestParam double latitude) {
+        return ApiResponse.success(redisService.geoAdd(key, member, longitude, latitude));
+    }
+
+
+    /**
+     * 查询 GEO 成员坐标。
+     * 对应 Redis：GEOPOS
+     */
+    @GetMapping("/geo/position")
+    public ApiResponse<List<Point>> geoPosition(@RequestParam String key, @RequestParam String member) {
+        return ApiResponse.success(redisService.geoPosition(key, member));
+    }
+
+
+    /**
+     * 计算两个 GEO 成员之间的距离。
+     * 对应 Redis：GEODIST
+     */
+    @GetMapping("/geo/distance")
+    public ApiResponse<Double> geoDistance(@RequestParam String key, @RequestParam String member1, @RequestParam String member2) {
+        return ApiResponse.success(redisService.geoDistance(key, member1, member2));
+    }
+
+
+    /**
+     * 删除 GEO 成员。
+     */
+    @DeleteMapping("/geo")
+    public ApiResponse<Long> geoRemove(@RequestParam String key, @RequestParam String member) {
+        return ApiResponse.success(redisService.geoRemove(key, member));
+    }
+
+
+    /**
+     * 查询指定坐标附近的 GEO 成员。
+     * 对应 Redis：GEOSEARCH
+     * <p>
+     * 当前返回：
+     * member + 距离
+     * <p>
+     * 可应用于：
+     * 附近门店、附近骑手、附近充电桩等。
+     */
+    @GetMapping("/geo/nearby")
+    public ApiResponse<List<String>> geoSearchNearby(
+            @RequestParam String key,
+            @RequestParam double longitude,
+            @RequestParam double latitude,
+            @RequestParam double radiusKm
+    ) {
+        return ApiResponse.success(redisService.geoSearchNearby(key, longitude, latitude, radiusKm));
     }
 }

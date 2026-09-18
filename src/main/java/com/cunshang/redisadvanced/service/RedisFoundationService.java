@@ -1,8 +1,16 @@
 package com.cunshang.redisadvanced.service;
 
+import org.springframework.data.geo.Distance;
+import org.springframework.data.geo.Point;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.domain.geo.Metrics;
 import org.springframework.stereotype.Service;
+import org.springframework.data.geo.Distance;
+import org.springframework.data.geo.GeoResult;
+import org.springframework.data.geo.GeoResults;
+import org.springframework.data.redis.connection.RedisGeoCommands;
+import org.springframework.data.redis.domain.geo.GeoReference;
 
 import java.time.Duration;
 import java.util.List;
@@ -435,5 +443,85 @@ public class RedisFoundationService {
      */
     public Long hyperLogLogMerge(String destinationKey, String... sourceKeys) {
         return redisTemplate.opsForHyperLogLog().union(destinationKey, sourceKeys);
+    }
+
+    // GEO 类型========================================================================
+
+    /**
+     * 添加 GEO 成员及经纬度。
+     * 对应 Redis：GEOADD key longitude latitude member
+     * <p>
+     * 可应用于：
+     * 门店、骑手、充电桩等位置数据。
+     */
+    public Long geoAdd(String key, String member, double longitude, double latitude) {
+        Point point = new Point(longitude, latitude);
+        return redisTemplate.opsForGeo().add(key, point, member);
+    }
+
+    /**
+     * 查询 GEO 成员坐标。
+     * 对应 Redis：GEOPOS key member
+     */
+    public List<Point> geoPosition(String key, String member) {
+        return redisTemplate.opsForGeo().position(key, member);
+    }
+
+    /**
+     * 计算两个 GEO 成员之间的距离。
+     * 对应 Redis：GEODIST
+     * <p>
+     * 当前统一使用公里。
+     */
+    public Double geoDistance(String key, String member1, String member2) {
+        Distance distance = redisTemplate.opsForGeo().distance(key, member1, member2, Metrics.KILOMETERS);
+        return distance == null ? null : distance.getValue();
+    }
+
+    /**
+     * 删除 GEO 成员。
+     * <p>
+     * 对应 Redis GEO 数据中的成员删除。
+     */
+    public Long geoRemove(String key, String member) {
+        return redisTemplate.opsForGeo().remove(key, member);
+    }
+
+    /**
+     * 查询指定坐标附近的 GEO 成员。
+     * 对应 Redis：GEOSEARCH
+     * <p>
+     * 当前返回：
+     * member + 距离
+     * <p>
+     * 可应用于：
+     * 附近门店、附近骑手、附近充电桩等。
+     */
+    public List<String> geoSearchNearby(String key, double longitude, double latitude, double radiusKm) {
+        GeoReference<String> reference = GeoReference.fromCoordinate(longitude, latitude);
+
+        Distance radius = new Distance(radiusKm, Metrics.KILOMETERS);
+
+        RedisGeoCommands.GeoSearchCommandArgs args = RedisGeoCommands.
+                GeoSearchCommandArgs.
+                newGeoSearchArgs().
+                includeDistance().
+                sortAscending();
+
+        GeoResults<RedisGeoCommands.GeoLocation<String>> results = redisTemplate.
+                opsForGeo().
+                search(key, reference, radius, args);
+
+        if (results == null) {
+            return List.of();
+        }
+
+        return results.getContent().
+                stream().
+                map(result -> {
+            String member = result.getContent().getName();
+            Distance distance = result.getDistance();
+            return member + " -> " + distance.getValue() + " km";
+        }).toList();
     }
 }

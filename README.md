@@ -121,7 +121,7 @@ Actuator 当前开放：
 | WRONGTYPE 类型冲突处理 | ✅ |
 | Bitmap | ✅ |
 | HyperLogLog | ✅ |
-| GEO | ⏳ |
+| GEO | ✅ |
 | Stream | ⏳ |
 | Cache Aside | ⏳ |
 | 缓存穿透 / 击穿 / 雪崩 | ⏳ |
@@ -874,6 +874,227 @@ HyperLogLog
 
 ---
 
+
+# Redis GEO
+
+## 特点
+
+Redis GEO 用于存储和查询地理位置数据，并支持：
+
+```text
+坐标存储
+坐标查询
+两点距离计算
+指定半径附近搜索
+```
+
+Redis GEO 本身不会获取 GPS 定位，它只负责对已经得到的经纬度进行存储、距离计算和附近检索。
+
+Spring Data Redis：
+
+```java
+redisTemplate.opsForGeo()
+```
+
+## 已实现功能
+
+| Redis 命令 / 能力 | Service 方法 | 功能 |
+|---|---|---|
+| GEOADD | `geoAdd()` | 添加成员及经纬度 |
+| GEOPOS | `geoPosition()` | 查询成员坐标 |
+| GEODIST | `geoDistance()` | 计算两个成员之间的距离 |
+| GEOSEARCH | `geoSearchNearby()` | 按坐标和半径搜索附近成员 |
+| REMOVE | `geoRemove()` | 删除 GEO 成员 |
+
+## 核心代码
+
+```java
+public Long geoAdd(
+        String key,
+        String member,
+        double longitude,
+        double latitude
+) {
+    Point point = new Point(longitude, latitude);
+
+    return redisTemplate.opsForGeo()
+            .add(key, point, member);
+}
+```
+
+```java
+public List<Point> geoPosition(
+        String key,
+        String member
+) {
+    return redisTemplate.opsForGeo()
+            .position(key, member);
+}
+```
+
+```java
+public Double geoDistance(
+        String key,
+        String member1,
+        String member2
+) {
+    Distance distance = redisTemplate.opsForGeo()
+            .distance(
+                    key,
+                    member1,
+                    member2,
+                    Metrics.KILOMETERS
+            );
+
+    return distance == null
+            ? null
+            : distance.getValue();
+}
+```
+
+```java
+public List<String> geoSearchNearby(
+        String key,
+        double longitude,
+        double latitude,
+        double radiusKm
+) {
+    GeoReference<String> reference =
+            GeoReference.fromCoordinate(longitude, latitude);
+
+    Distance radius =
+            new Distance(radiusKm, Metrics.KILOMETERS);
+
+    RedisGeoCommands.GeoSearchCommandArgs args =
+            RedisGeoCommands.GeoSearchCommandArgs
+                    .newGeoSearchArgs()
+                    .includeDistance()
+                    .sortAscending();
+
+    GeoResults<RedisGeoCommands.GeoLocation<String>> results =
+            redisTemplate.opsForGeo()
+                    .search(
+                            key,
+                            reference,
+                            radius,
+                            args
+                    );
+
+    if (results == null) {
+        return List.of();
+    }
+
+    return results.getContent()
+            .stream()
+            .map(result -> {
+                String member = result.getContent().getName();
+                Distance distance = result.getDistance();
+
+                return member
+                        + " -> "
+                        + distance.getValue()
+                        + " km";
+            })
+            .toList();
+}
+```
+
+```java
+public Long geoRemove(
+        String key,
+        String member
+) {
+    return redisTemplate.opsForGeo()
+            .remove(key, member);
+}
+```
+
+## 可应用场景（示例）
+
+- 附近门店
+- 附近骑手
+- 附近充电桩
+- 附近车辆
+- 设备位置缓存
+- 用户与门店距离计算
+
+> 当前项目只实现并验证了 Redis GEO 的基础能力，上述内容属于可应用方向示例，并非已经实现的完整定位、地图或配送业务系统。
+
+## 已验证内容
+
+测试 Key：
+
+```text
+demo:geo:stores
+```
+
+已完成：
+
+```text
+GEOADD
+GEOPOS
+GEODIST
+GEOSEARCH
+REMOVE
+```
+
+测试中验证了：
+
+```text
+按经纬度写入多个成员
+查询成员坐标
+计算两个成员之间的公里距离
+按指定坐标 + 半径搜索附近成员
+附近搜索结果按距离从近到远排序
+删除成员后无法继续查询其位置
+```
+
+## 坐标精度
+
+测试写入：
+
+```text
+longitude = 113.2644
+latitude  = 23.1291
+```
+
+通过 `GEOPOS` 查询时返回过类似：
+
+```json
+{
+  "x": 113.26440006494522,
+  "y": 23.129101186703004
+}
+```
+
+这类极小的小数偏差属于正常现象。
+
+因此业务代码不应把 GEO 查询返回的经纬度与原始输入做严格的浮点绝对相等判断。
+
+## 注意事项
+
+- Redis GEO 使用经度和纬度，顺序不能写反：
+
+```text
+longitude
+latitude
+```
+
+- Java `Point` 当前使用：
+
+```java
+new Point(longitude, latitude)
+```
+
+- `GEOSEARCH` 当前按指定经纬度作为中心进行半径搜索。
+- 当前距离单位统一使用 `Metrics.KILOMETERS`。
+- `includeDistance()` 会返回成员与搜索中心之间的距离。
+- `sortAscending()` 会让结果按距离从近到远排列。
+- Redis GEO 负责存位置、算距离和查附近，不负责获取设备真实 GPS 位置。
+- 当前 `geoSearchNearby()` 为了保持学习阶段简单，返回 `List<String>`；真实项目可进一步使用 DTO 返回 member、distance 等结构化字段。
+
+---
+
 # 当前 Controller API
 
 统一前缀：
@@ -920,6 +1141,11 @@ HyperLogLog
 /hyperloglog
 /hyperloglog/count
 /hyperloglog/merge
+
+/geo
+/geo/position
+/geo/distance
+/geo/nearby
 ```
 
 ---
@@ -941,7 +1167,7 @@ Controller 暴露接口
         ↓
 通过 redis-cli 二次确认
         ↓
-记录真实业务场景与注意事项
+记录可应用业务场景与注意事项
 ```
 
 目标不是只记住 Redis 命令，而是理解：
@@ -960,24 +1186,23 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. GEO
-2. Stream
-3. Spring Boot Redis 序列化与对象存储
-4. Pipeline / 批量操作
-5. Cache Aside
-6. 缓存穿透、击穿、雪崩
-7. Redis + MySQL 缓存一致性
-8. TTL 与内存淘汰策略
-9. 分布式锁
-10. Lua
-11. MULTI / EXEC / WATCH
-12. RDB / AOF
-13. 主从复制
-14. Sentinel
-15. Redis Cluster
-16. Hot Key / Big Key / Slowlog
-17. ACL、连接池、超时、重试、监控
-18. Spring Boot 日志规范、SLF4J、Logback、AOP 请求链路日志
+1. Stream
+2. Spring Boot Redis 序列化与对象存储
+3. Pipeline / 批量操作
+4. Cache Aside
+5. 缓存穿透、击穿、雪崩
+6. Redis + MySQL 缓存一致性
+7. TTL 与内存淘汰策略
+8. 分布式锁
+9. Lua
+10. MULTI / EXEC / WATCH
+11. RDB / AOF
+12. 主从复制
+13. Sentinel
+14. Redis Cluster
+15. Hot Key / Big Key / Slowlog
+16. ACL、连接池、超时、重试、监控
+17. Spring Boot 日志规范、SLF4J、Logback、AOP 请求链路日志
 
 ---
 
