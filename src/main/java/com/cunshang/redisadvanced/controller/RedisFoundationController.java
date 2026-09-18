@@ -32,10 +32,7 @@ public class RedisFoundationController {
      * value=cunshang
      */
     @PostMapping("/string")
-    public ApiResponse<Void> set(
-            @RequestParam String key,
-            @RequestParam String value
-    ) {
+    public ApiResponse<Void> set(@RequestParam String key, @RequestParam String value) {
         redisService.set(key, value);
         //return "OK";
         return ApiResponse.success();
@@ -54,11 +51,7 @@ public class RedisFoundationController {
      * SET + TTL
      */
     @PostMapping("/string/ttl")
-    public ApiResponse<Void> setWithTtl(
-            @RequestParam String key,
-            @RequestParam String value,
-            @RequestParam long seconds
-    ) {
+    public ApiResponse<Void> setWithTtl(@RequestParam String key, @RequestParam String value, @RequestParam long seconds) {
         /*redisService.setWithTtl(key, value, seconds);
         return "OK";*/
         if (seconds <= 0) throw new IllegalArgumentException("你个人才，设置 0 秒？！意义何在啊；");
@@ -99,11 +92,7 @@ public class RedisFoundationController {
      * Hash - HSET
      */
     @PostMapping("/hash")
-    public ApiResponse<Void> hashSet(
-            @RequestParam String key,
-            @RequestParam String field,
-            @RequestParam String value
-    ) {
+    public ApiResponse<Void> hashSet(@RequestParam String key, @RequestParam String field, @RequestParam String value) {
         redisService.hashSet(key, field, value);
         // return "OK";
         return ApiResponse.success();
@@ -113,10 +102,7 @@ public class RedisFoundationController {
      * Hash - HGET
      */
     @GetMapping("/hash")
-    public ApiResponse<Object> hashGet(
-            @RequestParam String key,
-            @RequestParam String field
-    ) {
+    public ApiResponse<Object> hashGet(@RequestParam String key, @RequestParam String field) {
         //return redisService.hashGet(key, field);
         return ApiResponse.success(redisService.hashGet(key, field));
     }
@@ -147,10 +133,7 @@ public class RedisFoundationController {
      * @return 添加后 List 的元素数量
      */
     @PostMapping("/list/left")
-    public ApiResponse<Long> listLeftPush(
-            @RequestParam String key,
-            @RequestParam String value
-    ) {
+    public ApiResponse<Long> listLeftPush(@RequestParam String key, @RequestParam String value) {
         return ApiResponse.success(redisService.listLeftPush(key, value));
     }
 
@@ -162,10 +145,7 @@ public class RedisFoundationController {
      * @return 添加后 List 的元素数量
      */
     @PostMapping("/list/right")
-    public ApiResponse<Long> listRightPush(
-            @RequestParam String key,
-            @RequestParam String value
-    ) {
+    public ApiResponse<Long> listRightPush(@RequestParam String key, @RequestParam String value) {
         return ApiResponse.success(redisService.listRightPush(key, value));
     }
 
@@ -176,11 +156,7 @@ public class RedisFoundationController {
      * 默认 0 ~ -1，表示获取全部元素。
      */
     @GetMapping("/list")
-    public ApiResponse<List<String>> listRange(
-            @RequestParam String key,
-            @RequestParam(defaultValue = "0") long start,
-            @RequestParam(defaultValue = "-1") long end
-    ) {
+    public ApiResponse<List<String>> listRange(@RequestParam String key, @RequestParam(defaultValue = "0") long start, @RequestParam(defaultValue = "-1") long end) {
         return ApiResponse.success(redisService.listRange(key, start, end));
     }
 
@@ -225,12 +201,8 @@ public class RedisFoundationController {
      * 可用此三层业务链体验 Set 的自动去重
      */
     @PostMapping("/set")
-    public ApiResponse<Long> setAdd(
-            @RequestParam String key,
-            @RequestParam String member
-    ) {
-        return ApiResponse.success(redisService.setAdd(key, member)
-        );
+    public ApiResponse<Long> setAdd(@RequestParam String key, @RequestParam String member) {
+        return ApiResponse.success(redisService.setAdd(key, member));
     }
 
     /**
@@ -238,9 +210,7 @@ public class RedisFoundationController {
      * 对应 Redis：SMEMBERS key
      */
     @GetMapping("/set")
-    public ApiResponse<Set<String>> setMembers(
-            @RequestParam String key
-    ) {
+    public ApiResponse<Set<String>> setMembers(@RequestParam String key) {
         return ApiResponse.success(redisService.setMembers(key));
     }
 
@@ -249,10 +219,7 @@ public class RedisFoundationController {
      * 对应 Redis：SISMEMBER key member
      */
     @GetMapping("/set/member")
-    public ApiResponse<Boolean> setIsMember(
-            @RequestParam String key,
-            @RequestParam String member
-    ) {
+    public ApiResponse<Boolean> setIsMember(@RequestParam String key, @RequestParam String member) {
         return ApiResponse.success(redisService.setIsMember(key, member));
     }
 
@@ -261,10 +228,7 @@ public class RedisFoundationController {
      * 对应 Redis：SREM key member
      */
     @DeleteMapping("/set")
-    public ApiResponse<Long> setRemove(
-            @RequestParam String key,
-            @RequestParam String member
-    ) {
+    public ApiResponse<Long> setRemove(@RequestParam String key, @RequestParam String member) {
         return ApiResponse.success(redisService.setRemove(key, member));
     }
 
@@ -273,9 +237,7 @@ public class RedisFoundationController {
      * 对应 Redis：SCARD key
      */
     @GetMapping("/set/size")
-    public ApiResponse<Long> setSize(
-            @RequestParam String key
-    ) {
+    public ApiResponse<Long> setSize(@RequestParam String key) {
         return ApiResponse.success(redisService.setSize(key));
     }
 
@@ -285,10 +247,7 @@ public class RedisFoundationController {
      * 对应社交软件的做法是：共同标签 / 共同兴趣 / 共同好友；
      */
     @GetMapping("/set/intersect")
-    public ApiResponse<Set<String>> setIntersect(
-            @RequestParam String key1,
-            @RequestParam String key2
-    ) {
+    public ApiResponse<Set<String>> setIntersect(@RequestParam String key1, @RequestParam String key2) {
         return ApiResponse.success(redisService.setIntersect(key1, key2));
     }
 
@@ -298,10 +257,7 @@ public class RedisFoundationController {
      * 此做法的特点是：两者都有的元素基础上去重；
      */
     @GetMapping("/set/union")
-    public ApiResponse<Set<String>> setUnion(
-            @RequestParam String key1,
-            @RequestParam String key2
-    ) {
+    public ApiResponse<Set<String>> setUnion(@RequestParam String key1, @RequestParam String key2) {
         return ApiResponse.success(redisService.setUnion(key1, key2));
     }
 
@@ -312,10 +268,7 @@ public class RedisFoundationController {
      * 这里表示 key1 - key2。
      */
     @GetMapping("/set/difference")
-    public ApiResponse<Set<String>> setDifference(
-            @RequestParam String key1,
-            @RequestParam String key2
-    ) {
+    public ApiResponse<Set<String>> setDifference(@RequestParam String key1, @RequestParam String key2) {
         return ApiResponse.success(redisService.setDifference(key1, key2));
     }
 
@@ -330,11 +283,7 @@ public class RedisFoundationController {
      * !!!很重要的一点：ZADD 对已存在 member 可以更新 score，返回值不一定代表操作失败。
      */
     @PostMapping("/zset")
-    public ApiResponse<Boolean> zSetAdd(
-            @RequestParam String key,
-            @RequestParam String member,
-            @RequestParam double score
-    ) {
+    public ApiResponse<Boolean> zSetAdd(@RequestParam String key, @RequestParam String member, @RequestParam double score) {
         return ApiResponse.success(redisService.zSetAdd(key, member, score));
     }
 
@@ -346,11 +295,7 @@ public class RedisFoundationController {
      * 查询最低积分区间、低分段用户。
      */
     @GetMapping("/zset")
-    public ApiResponse<Set<String>> zSetRange(
-            @RequestParam String key,
-            @RequestParam(defaultValue = "0") long start,
-            @RequestParam(defaultValue = "-1") long end
-    ) {
+    public ApiResponse<Set<String>> zSetRange(@RequestParam String key, @RequestParam(defaultValue = "0") long start, @RequestParam(defaultValue = "-1") long end) {
         return ApiResponse.success(redisService.zSetRange(key, start, end));
     }
 
@@ -363,11 +308,7 @@ public class RedisFoundationController {
      * 游戏排行榜、热度榜 Top ***。
      */
     @GetMapping("/zset/reverse")
-    public ApiResponse<Set<String>> zSetReverseRange(
-            @RequestParam String key,
-            @RequestParam(defaultValue = "0") long start,
-            @RequestParam(defaultValue = "-1") long end
-    ) {
+    public ApiResponse<Set<String>> zSetReverseRange(@RequestParam String key, @RequestParam(defaultValue = "0") long start, @RequestParam(defaultValue = "-1") long end) {
         return ApiResponse.success(redisService.zSetReverseRange(key, start, end));
     }
 
@@ -380,10 +321,7 @@ public class RedisFoundationController {
      * 查询用户当前积分。
      */
     @GetMapping("/zset/score")
-    public ApiResponse<Double> zSetScore(
-            @RequestParam String key,
-            @RequestParam String member
-    ) {
+    public ApiResponse<Double> zSetScore(@RequestParam String key, @RequestParam String member) {
         return ApiResponse.success(redisService.zSetScore(key, member));
     }
 
@@ -396,11 +334,7 @@ public class RedisFoundationController {
      * 游戏胜利积分 +10、文章热度 +1。
      */
     @PostMapping("/zset/score/increment")
-    public ApiResponse<Double> zSetIncrementScore(
-            @RequestParam String key,
-            @RequestParam String member,
-            @RequestParam double increment
-    ) {
+    public ApiResponse<Double> zSetIncrementScore(@RequestParam String key, @RequestParam String member, @RequestParam double increment) {
         return ApiResponse.success(redisService.zSetIncrementScore(key, member, increment));
     }
 
@@ -411,10 +345,7 @@ public class RedisFoundationController {
      * Redis 排名从 0 开始。
      */
     @GetMapping("/zset/rank")
-    public ApiResponse<Long> zSetRank(
-            @RequestParam String key,
-            @RequestParam String member
-    ) {
+    public ApiResponse<Long> zSetRank(@RequestParam String key, @RequestParam String member) {
         return ApiResponse.success(redisService.zSetRank(key, member));
     }
 
@@ -429,10 +360,7 @@ public class RedisFoundationController {
      * 查询“我在排行榜第几名”。
      */
     @GetMapping("/zset/reverse-rank")
-    public ApiResponse<Long> zSetReverseRank(
-            @RequestParam String key,
-            @RequestParam String member
-    ) {
+    public ApiResponse<Long> zSetReverseRank(@RequestParam String key, @RequestParam String member) {
         return ApiResponse.success(redisService.zSetReverseRank(key, member));
     }
 
@@ -445,10 +373,7 @@ public class RedisFoundationController {
      * 用户退出排行榜、榜单移除商品。
      */
     @DeleteMapping("/zset")
-    public ApiResponse<Long> zSetRemove(
-            @RequestParam String key,
-            @RequestParam String member
-    ) {
+    public ApiResponse<Long> zSetRemove(@RequestParam String key, @RequestParam String member) {
         return ApiResponse.success(redisService.zSetRemove(key, member));
     }
 
@@ -458,9 +383,52 @@ public class RedisFoundationController {
      * 对应 Redis：ZCARD key
      */
     @GetMapping("/zset/size")
-    public ApiResponse<Long> zSetSize(
-            @RequestParam String key
-    ) {
+    public ApiResponse<Long> zSetSize(@RequestParam String key) {
         return ApiResponse.success(redisService.zSetSize(key));
     }
+
+
+    //  Bitmap 类型========================================================================
+
+
+    /**
+     * 设置 Bitmap 指定位的状态。
+     * 对应 Redis：SETBIT key offset value
+     * <p>
+     * 真实场景：
+     * 记录用户某一天是否签到。
+     *
+     * @return 修改之前该位置的旧值
+     */
+    @PostMapping("/bitmap")
+    public ApiResponse<Boolean> bitmapSet(@RequestParam String key, @RequestParam long offset, @RequestParam boolean value) {
+        return ApiResponse.success(redisService.bitmapSet(key, offset, value));
+    }
+
+
+    /**
+     * 查询 Bitmap 指定位的状态。
+     * 对应 Redis：GETBIT key offset
+     * <p>
+     * 真实场景：
+     * 查询用户某一天是否已经签到。
+     */
+    @GetMapping("/bitmap")
+    public ApiResponse<Boolean> bitmapGet(@RequestParam String key, @RequestParam long offset) {
+        return ApiResponse.success(redisService.bitmapGet(key, offset));
+    }
+
+
+    /**
+     * 统计 Bitmap 中值为 1 的数量。
+     * 对应 Redis：BITCOUNT key
+     * <p>
+     * 真实场景：
+     * 统计用户本月累计签到天数。
+     */
+    @GetMapping("/bitmap/count")
+    public ApiResponse<Long> bitmapCount(@RequestParam String key) {
+        return ApiResponse.success(redisService.bitmapCount(key));
+    }
+
 }

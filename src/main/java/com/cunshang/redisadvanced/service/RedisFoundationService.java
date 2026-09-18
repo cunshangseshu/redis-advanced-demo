@@ -1,5 +1,6 @@
 package com.cunshang.redisadvanced.service;
 
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -93,11 +94,7 @@ public class RedisFoundationService {
      * <p>
      * HSET key field value
      */
-    public void hashSet(
-            String key,
-            String field,
-            String value
-    ) {
+    public void hashSet(String key, String field, String value) {
         redisTemplate.opsForHash().put(key, field, value);
     }
 
@@ -106,10 +103,7 @@ public class RedisFoundationService {
      * <p>
      * HGET key field
      */
-    public Object hashGet(
-            String key,
-            String field
-    ) {
+    public Object hashGet(String key, String field) {
         return redisTemplate.opsForHash().get(key, field);
     }
 
@@ -127,10 +121,7 @@ public class RedisFoundationService {
      * <p>
      * HDEL key field
      */
-    public Long hashDelete(
-            String key,
-            String field
-    ) {
+    public Long hashDelete(String key, String field) {
         return redisTemplate.opsForHash().delete(key, field);
     }
 
@@ -298,7 +289,6 @@ public class RedisFoundationService {
         return redisTemplate.opsForZSet().add(key, member, score);
     }
 
-
     /**
      * 按 score 从低到高获取元素。
      * 对应 Redis：ZRANGE key start end
@@ -308,7 +298,6 @@ public class RedisFoundationService {
         return redisTemplate.opsForZSet().range(key, start, end);
     }
 
-
     /**
      * 按 score 从高到低获取元素(reserveRange <-> range 两极反转~~~)。
      * <p>
@@ -317,7 +306,6 @@ public class RedisFoundationService {
     public Set<String> zSetReverseRange(String key, long start, long end) {
         return redisTemplate.opsForZSet().reverseRange(key, start, end);
     }
-
 
     /**
      * 获取指定 member 的 score。
@@ -329,22 +317,15 @@ public class RedisFoundationService {
         return redisTemplate.opsForZSet().score(key, member);
     }
 
-
     /**
      * 增加指定 member 的 score。
      * 对应 Redis：ZINCRBY key increment member
      *
      * @return 修改后的新 score
      */
-    public Double zSetIncrementScore(
-            String key,
-            String member,
-            double increment
-    ) {
-        return redisTemplate.opsForZSet()
-                .incrementScore(key, member, increment);
+    public Double zSetIncrementScore(String key, String member, double increment) {
+        return redisTemplate.opsForZSet().incrementScore(key, member, increment);
     }
-
 
     /**
      * 获取指定 member 的正序排名。
@@ -354,7 +335,6 @@ public class RedisFoundationService {
     public Long zSetRank(String key, String member) {
         return redisTemplate.opsForZSet().rank(key, member);
     }
-
 
     /**
      * 获取 member 的倒序排名。
@@ -366,7 +346,6 @@ public class RedisFoundationService {
         return redisTemplate.opsForZSet().reverseRank(key, member);
     }
 
-
     /**
      * 删除 ZSet 中的元素。
      * 对应 Redis：ZREM key member
@@ -374,7 +353,6 @@ public class RedisFoundationService {
     public Long zSetRemove(String key, String member) {
         return redisTemplate.opsForZSet().remove(key, member);
     }
-
 
     /**
      * 获取 ZSet 元素数量。
@@ -385,5 +363,44 @@ public class RedisFoundationService {
         return size == null ? 0L : size;
     }
 
+    //  Bitmap 类型========================================================================
+
+    /**
+     * 设置 Bitmap 指定位的状态。
+     * 对应 Redis：SETBIT key offset value
+     * <p>
+     * 真实场景：
+     * 用户签到、是否在线、活动参与状态。
+     */
+    public Boolean bitmapSet(String key, long offset, boolean value) {
+        return redisTemplate.opsForValue().setBit(key, offset, value);
+    }
+
+    /**
+     * 查询 Bitmap 指定位的状态。
+     * 对应 Redis：GETBIT key offset
+     * <p>
+     * 真实场景：
+     * 判断用户某天是否签到。
+     */
+    public Boolean bitmapGet(String key, long offset) {
+        return redisTemplate.opsForValue().getBit(key, offset);
+    }
+
+    /**
+     * 统计 Bitmap 中值为 1 的 bit 数量。
+     * 对应 Redis：BITCOUNT key
+     * <p>
+     * 真实场景：
+     * 统计用户本月签到多少天。
+     */
+    public long bitmapCount(String key) {
+        byte[] rawKey = redisTemplate.getStringSerializer().serialize(key);
+        if (rawKey == null) {
+            return 0L;
+        }
+        Long count = redisTemplate.execute((RedisCallback<Long>) connection -> connection.stringCommands().bitCount(rawKey));
+        return count == null ? 0L : count;
+    }
 
 }
