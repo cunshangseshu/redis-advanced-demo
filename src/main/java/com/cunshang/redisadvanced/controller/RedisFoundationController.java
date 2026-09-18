@@ -524,12 +524,40 @@ public class RedisFoundationController {
      * 附近门店、附近骑手、附近充电桩等。
      */
     @GetMapping("/geo/nearby")
-    public ApiResponse<List<String>> geoSearchNearby(
-            @RequestParam String key,
-            @RequestParam double longitude,
-            @RequestParam double latitude,
-            @RequestParam double radiusKm
-    ) {
+    public ApiResponse<List<String>> geoSearchNearby(@RequestParam String key, @RequestParam double longitude, @RequestParam double latitude, @RequestParam double radiusKm) {
         return ApiResponse.success(redisService.geoSearchNearby(key, longitude, latitude, radiusKm));
+    }
+
+
+    // Stream 类型========================================================================
+
+
+    /**
+     * 向 Stream 添加消息。
+     * 对应 Redis：XADD
+     */
+    @PostMapping("/stream")
+    public ApiResponse<String> streamAdd(@RequestParam String key, @RequestParam String field, @RequestParam String value) {
+        return ApiResponse.success(redisService.streamAdd(key, field, value));
+    }
+
+
+    /**
+     * 查询 Stream 全部消息。
+     * 对应 Redis：XRANGE key - +
+     */
+    @GetMapping("/stream")
+    public ApiResponse<List<Map<String, Object>>> streamRange(@RequestParam String key) {
+        return ApiResponse.success(redisService.streamRange(key));
+    }
+
+
+    /**
+     * 查询 Stream 消息数量。
+     * 对应 Redis：XLEN
+     */
+    @GetMapping("/stream/size")
+    public ApiResponse<Long> streamSize(@RequestParam String key) {
+        return ApiResponse.success(redisService.streamSize(key));
     }
 }

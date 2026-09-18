@@ -1,18 +1,20 @@
 package com.cunshang.redisadvanced.service;
 
+import org.springframework.data.domain.Range;
+import org.springframework.data.redis.connection.stream.MapRecord;
+import org.springframework.data.redis.connection.stream.RecordId;
 import org.springframework.data.geo.Distance;
 import org.springframework.data.geo.Point;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.domain.geo.Metrics;
 import org.springframework.stereotype.Service;
-import org.springframework.data.geo.Distance;
-import org.springframework.data.geo.GeoResult;
 import org.springframework.data.geo.GeoResults;
 import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.domain.geo.GeoReference;
 
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -502,26 +504,59 @@ public class RedisFoundationService {
 
         Distance radius = new Distance(radiusKm, Metrics.KILOMETERS);
 
-        RedisGeoCommands.GeoSearchCommandArgs args = RedisGeoCommands.
-                GeoSearchCommandArgs.
-                newGeoSearchArgs().
-                includeDistance().
-                sortAscending();
+        RedisGeoCommands.GeoSearchCommandArgs args = RedisGeoCommands.GeoSearchCommandArgs.newGeoSearchArgs().includeDistance().sortAscending();
 
-        GeoResults<RedisGeoCommands.GeoLocation<String>> results = redisTemplate.
-                opsForGeo().
-                search(key, reference, radius, args);
+        GeoResults<RedisGeoCommands.GeoLocation<String>> results = redisTemplate.opsForGeo().search(key, reference, radius, args);
 
         if (results == null) {
             return List.of();
         }
 
-        return results.getContent().
-                stream().
-                map(result -> {
+        return results.getContent().stream().map(result -> {
             String member = result.getContent().getName();
             Distance distance = result.getDistance();
             return member + " -> " + distance.getValue() + " km";
         }).toList();
+    }
+
+
+    // Stream 类型========================================================================
+
+
+    /**
+     * 向 Stream 添加消息。
+     * 对应 Redis：XADD
+     * <p>
+     * 当前由 Redis 自动生成消息 ID。
+     */
+    public String streamAdd(String key, String field, String value) {
+        RecordId recordId = redisTemplate.opsForStream().add(key, Map.of(field, value));
+        return recordId == null ? null : recordId.getValue();
+    }
+
+    /**
+     * 查询 Stream 中的全部消息。
+     * 对应 Redis：XRANGE key - +
+     */
+    public List<Map<String, Object>> streamRange(String key) {
+        List<MapRecord<String, Object, Object>> records = redisTemplate.opsForStream().range(key, Range.unbounded());
+        if (records == null) {
+            return List.of();
+        }
+        return records.stream().map(record -> {
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("id", record.getId().getValue());
+            result.put("body", record.getValue());
+            return result;
+        }).toList();
+    }
+
+    /**
+     * 查询 Stream 中的消息数量。
+     * 对应 Redis：XLEN
+     */
+    public long streamSize(String key) {
+        Long size = redisTemplate.opsForStream().size(key);
+        return size == null ? 0L : size;
     }
 }

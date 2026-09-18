@@ -122,7 +122,7 @@ Actuator 当前开放：
 | Bitmap | ✅ |
 | HyperLogLog | ✅ |
 | GEO | ✅ |
-| Stream | ⏳ |
+| Stream | ✅ |
 | Cache Aside | ⏳ |
 | 缓存穿透 / 击穿 / 雪崩 | ⏳ |
 | Redis + MySQL 缓存一致性 | ⏳ |
@@ -1095,6 +1095,165 @@ new Point(longitude, latitude)
 
 ---
 
+
+# Redis Stream
+
+## 特点
+
+Redis Stream 是一种面向消息流 / 事件流的数据结构。
+
+每条消息都会包含：
+
+```text
+RecordId
++
+field-value 消息内容
+```
+
+例如：
+
+```text
+1758190000000-0
+└── type -> CREATE
+```
+
+Spring Data Redis：
+
+```java
+redisTemplate.opsForStream()
+```
+
+## 已实现功能
+
+| Redis 命令 | Service 方法 | 功能 |
+|---|---|---|
+| XADD | `streamAdd()` | 向 Stream 追加消息 |
+| XRANGE | `streamRange()` | 查询当前 Stream 中的历史消息 |
+| XLEN | `streamSize()` | 查询消息数量 |
+
+## 核心代码
+
+```java
+public String streamAdd(
+        String key,
+        String field,
+        String value
+) {
+    RecordId recordId = redisTemplate.opsForStream()
+            .add(key, Map.of(field, value));
+
+    return recordId == null
+            ? null
+            : recordId.getValue();
+}
+```
+
+```java
+public List<Map<String, Object>> streamRange(
+        String key
+) {
+    List<MapRecord<String, Object, Object>> records =
+            redisTemplate.opsForStream()
+                    .range(key, Range.unbounded());
+
+    if (records == null) {
+        return List.of();
+    }
+
+    return records.stream()
+            .map(record -> {
+                Map<String, Object> result =
+                        new LinkedHashMap<>();
+
+                result.put(
+                        "id",
+                        record.getId().getValue()
+                );
+
+                result.put(
+                        "body",
+                        record.getValue()
+                );
+
+                return result;
+            })
+            .toList();
+}
+```
+
+```java
+public long streamSize(String key) {
+    Long size = redisTemplate.opsForStream()
+            .size(key);
+
+    return size == null ? 0L : size;
+}
+```
+
+## 可应用场景（示例）
+
+- 业务事件流
+- 操作日志流
+- 异步任务
+- 简单消息队列
+- 订单状态事件
+
+> 当前项目只实现并验证了 Stream 的基础读写与计数能力，上述内容属于可应用方向示例，并非已经实现的完整消息队列或订单事件系统。
+
+## 已验证内容
+
+测试 Key：
+
+```text
+demo:stream:events
+```
+
+已完成：
+
+```text
+XADD
+XRANGE
+XLEN
+RecordId 自动生成
+消息顺序验证
+重复消息内容写入验证
+```
+
+测试中验证了：
+
+```text
+CREATE
+PAY
+SHIP
+PAY
+```
+
+即使消息内容重复，每次执行 `XADD` 仍会生成一条新的 Stream 消息，并拥有独立 `RecordId`。
+
+## Stream 与 List
+
+```text
+List
+-> 普通有序元素
+-> 主要按位置进行读写
+
+Stream
+-> 有序消息流
+-> 每条消息拥有独立 RecordId
+-> 后续可继续扩展 XREAD、消费者组、ACK、Pending 等能力
+```
+
+## 注意事项
+
+- 当前 `streamAdd()` 由 Redis 自动生成 RecordId。
+- Stream 不会因为消息内容相同而自动去重。
+- `XRANGE` 当前通过 `Range.unbounded()` 查询全部已有消息。
+- 当前返回结果将每条消息整理为 `id + body`，方便 HTTP 接口查看。
+- 当前只实现 Stream 基础能力，尚未实现消费者组、ACK、Pending、消息重试等机制。
+- Stream 具备消息流能力，但不应简单理解为可以替代所有 Kafka / RabbitMQ 场景。
+
+---
+
 # 当前 Controller API
 
 统一前缀：
@@ -1146,6 +1305,9 @@ new Point(longitude, latitude)
 /geo/position
 /geo/distance
 /geo/nearby
+
+/stream
+/stream/size
 ```
 
 ---
@@ -1186,23 +1348,22 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. Stream
-2. Spring Boot Redis 序列化与对象存储
-3. Pipeline / 批量操作
-4. Cache Aside
-5. 缓存穿透、击穿、雪崩
-6. Redis + MySQL 缓存一致性
-7. TTL 与内存淘汰策略
-8. 分布式锁
-9. Lua
-10. MULTI / EXEC / WATCH
-11. RDB / AOF
-12. 主从复制
-13. Sentinel
-14. Redis Cluster
-15. Hot Key / Big Key / Slowlog
-16. ACL、连接池、超时、重试、监控
-17. Spring Boot 日志规范、SLF4J、Logback、AOP 请求链路日志
+1. Spring Boot Redis 序列化与对象存储
+2. Pipeline / 批量操作
+3. Cache Aside
+4. 缓存穿透、击穿、雪崩
+5. Redis + MySQL 缓存一致性
+6. TTL 与内存淘汰策略
+7. 分布式锁
+8. Lua
+9. MULTI / EXEC / WATCH
+10. RDB / AOF
+11. 主从复制
+12. Sentinel
+13. Redis Cluster
+14. Hot Key / Big Key / Slowlog
+15. ACL、连接池、超时、重试、监控
+16. Spring Boot 日志规范、SLF4J、Logback、AOP 请求链路日志
 
 ---
 
