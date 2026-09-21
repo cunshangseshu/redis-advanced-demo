@@ -2,6 +2,7 @@ package com.cunshang.redisadvanced.controller;
 
 import com.cunshang.redisadvanced.common.ApiResponse;
 import com.cunshang.redisadvanced.model.RedisUserProfile;
+import com.cunshang.redisadvanced.service.CacheAsideService;
 import com.cunshang.redisadvanced.service.RedisFoundationService;
 
 import org.springframework.data.geo.Point;
@@ -15,9 +16,13 @@ import java.util.Set;
 @RequestMapping("/api/redis")
 public class RedisFoundationController {
     private final RedisFoundationService redisService;
-
-    public RedisFoundationController(RedisFoundationService redisService) {
+    private final CacheAsideService cacheAsideService;
+    public RedisFoundationController(
+            RedisFoundationService redisService,
+            CacheAsideService cacheAsideService
+    ) {
         this.redisService = redisService;
+        this.cacheAsideService = cacheAsideService;
     }
 
     // String 类型========================================================================
@@ -605,5 +610,36 @@ public class RedisFoundationController {
     @PostMapping("/pipeline/get")
     public ApiResponse<List<Object>> pipelineGet(@RequestBody List<String> keys) {
         return ApiResponse.success(redisService.pipelineGet(keys));
+    }
+
+
+    //  基于配置类改造的自动序列化接口（Serializer）=========================================
+
+
+    /**
+     * 使用 RedisTemplate + JSON Serializer
+     * 自动序列化 Java 对象并写入 Redis。
+     */
+    @PostMapping("/template/object")
+    public ApiResponse<Void> templateObjectSet(@RequestParam String key, @RequestBody RedisUserProfile profile) {
+        redisService.templateObjectSet(key, profile);
+        return ApiResponse.success();
+    }
+
+    /**
+     * 使用 RedisTemplate 自动反序列化 Redis 中的 JSON。
+     */
+    @GetMapping("/template/object")
+    public ApiResponse<Object> templateObjectGet(@RequestParam String key) {
+        return ApiResponse.success(redisService.templateObjectGet(key));
+    }
+
+
+    //  redis、mysql写缓存 ===============================================================
+
+
+    @GetMapping("/cache/users/{id}")
+    public ApiResponse<RedisUserProfile> getCachedUser(@PathVariable Long id) {
+        return ApiResponse.success(cacheAsideService.getUser(id));
     }
 }

@@ -2,7 +2,7 @@
 
 基于 **Java 21 + Spring Boot 3.5.16 + Spring Data Redis + Redis 7.4** 的 Redis 学习与实践项目。
 
-本项目以“**边学、边写、边验证**”为核心方式，通过 Controller → Service → Redis 的完整调用链，逐步学习 Redis 的常用数据结构、异常处理、缓存、分布式锁、高可用与集群等内容。
+本项目以“**边学、边写、边验证**”为核心方式，通过 Controller → Service → Redis / MySQL 的完整调用链，逐步学习 Redis 的常用数据结构、序列化、缓存、分布式锁、高可用与集群等内容。
 
 ---
 
@@ -14,6 +14,8 @@
 - Spring Data Redis
 - Lettuce
 - Redis 7.4
+- MySQL 8.4
+- MyBatis-Plus 3.5.17
 - Docker Compose
 - Spring Boot Actuator
 - Maven
@@ -33,27 +35,35 @@ redis-advanced-demo
 │       │   ├── common
 │       │   │   ├── ApiResponse.java
 │       │   │   └── ResultCode.java
+│       │   ├── config
+│       │   │   └── RedisConfig.java
 │       │   ├── controller
 │       │   │   └── RedisFoundationController.java
+│       │   ├── entity
+│       │   │   └── UserProfile.java
 │       │   ├── exception
 │       │   │   ├── BusinessException.java
 │       │   │   └── GlobalExceptionHandler.java
+│       │   ├── mapper
+│       │   │   └── UserProfileMapper.java
 │       │   ├── model
 │       │   │   └── RedisUserProfile.java
 │       │   └── service
+│       │       ├── CacheAsideService.java
 │       │       └── RedisFoundationService.java
 │       └── resources
 │           └── application.yml
+├── mysql-data
 └── redis-data
 ```
 
-> `redis-data/` 为 Redis 本地持久化目录，应通过 `.gitignore` 排除，不提交到 Git 仓库。
+> `redis-data/` 与 `mysql-data/` 为本地持久化目录，应通过 `.gitignore` 排除，不提交到 Git 仓库。
 
 ---
 
 ## 运行方式
 
-### 1. 启动 Redis
+### 1. 启动 Redis 与 MySQL
 
 ```bash
 docker compose up -d
@@ -62,11 +72,21 @@ docker compose up -d
 当前 Docker 配置：
 
 ```text
-Redis 镜像：redis:7.4-alpine
-容器名称：redis-advanced-learning
-宿主机端口：6380
-容器端口：6379
-AOF：开启
+Redis
+├── 镜像：redis:7.4-alpine
+├── 容器名称：redis-advanced-learning
+├── 宿主机端口：6380
+├── 容器端口：6379
+└── AOF：开启
+
+MySQL
+├── 镜像：mysql:8.4
+├── 容器名称：redis-advanced-mysql
+├── 宿主机端口：3307
+├── 容器端口：3306
+├── 数据库：redis_learning
+├── 字符集：utf8mb4
+└── 排序规则：utf8mb4_0900_ai_ci
 ```
 
 ### 2. 验证 Redis
@@ -85,7 +105,18 @@ PING
 PONG
 ```
 
-### 3. 启动 Spring Boot
+### 3. 验证 MySQL
+
+```bash
+docker exec -it redis-advanced-mysql mysql -uroot -p123456
+```
+
+```sql
+USE redis_learning;
+SELECT * FROM user_profile;
+```
+
+### 4. 启动 Spring Boot
 
 应用默认端口：
 
@@ -93,10 +124,11 @@ PONG
 8080
 ```
 
-Redis 连接：
+中间件 / 数据源连接：
 
 ```text
-localhost:6380
+Redis：localhost:6380
+MySQL：localhost:3307/redis_learning
 ```
 
 Actuator 当前开放：
@@ -127,8 +159,8 @@ Actuator 当前开放：
 | Stream | ✅ |
 | Spring Boot Redis 对象存储与序列化 | ✅ |
 | Pipeline / 批量操作 | ✅ |
-| RedisTemplate / StringRedisTemplate / Serializer | ⏳ |
-| Cache Aside | ⏳ |
+| RedisTemplate / StringRedisTemplate / Serializer | ✅ |
+| Cache Aside | ✅ |
 | 缓存穿透 / 击穿 / 雪崩 | ⏳ |
 | Redis + MySQL 缓存一致性 | ⏳ |
 | 分布式锁 | ⏳ |
@@ -1373,9 +1405,6 @@ public RedisUserProfile objectGet(
 
 ```text
 POST /api/redis/object
-
-/pipeline
-/pipeline/get
 ```
 
 其中：
@@ -1392,9 +1421,6 @@ RedisUserProfile
 
 ```text
 GET /api/redis/object
-
-/pipeline
-/pipeline/get
 ```
 
 ## 已验证内容
@@ -1442,7 +1468,7 @@ Redis 中实际可看到类似：
 - `ObjectMapper.writeValueAsString()` 负责序列化。
 - `ObjectMapper.readValue()` 负责反序列化。
 - JSON 字段需要能够正确映射到目标 Java 类型。
-- 当前只实现基础对象存取，尚未引入统一 RedisTemplate 序列化配置、泛型对象处理、版本兼容策略等进一步内容。
+- 该章节保留手动 `ObjectMapper` 方案用于理解对象与 JSON 的转换过程；项目后续已增加统一 `RedisTemplate` JSON Serializer 配置进行自动序列化。
 - 这一能力会作为后续 Cache Aside 与 Redis + MySQL 缓存学习的基础。
 
 ---
@@ -1666,6 +1692,430 @@ GET key3
 
 ---
 
+
+# RedisTemplate / StringRedisTemplate / Serializer
+
+## 核心认识
+
+Redis 最终保存的是字节数据：
+
+```text
+Java 数据
+↓
+Serializer
+↓
+byte[]
+↓
+Redis
+```
+
+读取时执行相反过程：
+
+```text
+Redis byte[]
+↓
+Deserializer
+↓
+Java 数据
+```
+
+当前项目同时保留两种对象存储方式，用于对比理解序列化过程。
+
+### 手动 JSON 方案
+
+```text
+RedisUserProfile
+↓
+ObjectMapper
+↓
+JSON String
+↓
+StringRedisTemplate
+↓
+Redis
+```
+
+### RedisTemplate 自动 JSON 方案
+
+```text
+RedisUserProfile
+↓
+RedisTemplate<String, Object>
+↓
+GenericJackson2JsonRedisSerializer
+↓
+Redis
+```
+
+## 当前 RedisTemplate 配置
+
+项目新增：
+
+```text
+config/RedisConfig.java
+```
+
+核心配置：
+
+```java
+@Bean
+public RedisTemplate<String, Object> objectRedisTemplate(
+        RedisConnectionFactory connectionFactory
+) {
+    RedisTemplate<String, Object> template =
+            new RedisTemplate<>();
+
+    template.setConnectionFactory(connectionFactory);
+
+    StringRedisSerializer stringSerializer =
+            new StringRedisSerializer();
+
+    GenericJackson2JsonRedisSerializer jsonSerializer =
+            new GenericJackson2JsonRedisSerializer();
+
+    template.setKeySerializer(stringSerializer);
+    template.setValueSerializer(jsonSerializer);
+    template.setHashKeySerializer(stringSerializer);
+    template.setHashValueSerializer(jsonSerializer);
+
+    template.afterPropertiesSet();
+
+    return template;
+}
+```
+
+当前约定：
+
+```text
+普通 Key
+→ StringRedisSerializer
+
+普通 Value
+→ GenericJackson2JsonRedisSerializer
+
+Hash Field
+→ StringRedisSerializer
+
+Hash Value
+→ GenericJackson2JsonRedisSerializer
+```
+
+这样既保证 Key 便于通过 `redis-cli` 阅读和排障，也可以让 Java 对象通过统一 Serializer 自动完成 JSON 序列化与反序列化。
+
+## 已实现接口
+
+自动序列化写入：
+
+```text
+POST /api/redis/template/object
+```
+
+自动反序列化读取：
+
+```text
+GET /api/redis/template/object
+```
+
+## 已验证内容
+
+```text
+RedisUserProfile 直接写入 RedisTemplate
+Value 自动 JSON 序列化
+通过 redis-cli 查看序列化后的数据
+RedisTemplate 自动反序列化
+读取结果恢复为 RedisUserProfile
+无需在业务方法中手动调用 ObjectMapper
+```
+
+## StringRedisTemplate 与 RedisTemplate
+
+```text
+StringRedisTemplate
+→ 适合 String Key / String Value
+→ JSON 对象需要业务代码自行转换
+
+RedisTemplate<String, Object>
+→ 可直接处理 Java Object
+→ 实际存储格式由 Serializer 决定
+```
+
+两者不是“低级 / 高级”的关系，而是适用的数据模型与序列化责任不同。
+
+## 注意事项
+
+- Redis 最终面对的是字节数据，Java 对象不能未经序列化直接进入 Redis。
+- Serializer 属于基础设施配置；统一配置后，业务 Service 不应到处重复编写对象与 JSON 的转换逻辑。
+- 如果修改一个 Key 的序列化协议，旧缓存可能无法被新的 Serializer 正确读取，需要考虑旧数据清理或兼容策略。
+- `GenericJackson2JsonRedisSerializer` 面向通用对象序列化，Redis 中的 JSON 可能包含用于恢复 Java 类型的信息。
+- Key 通常优先保持字符串可读，方便排查线上缓存数据。
+
+---
+
+# Cache Aside
+
+## 当前实现
+
+项目已接入真实：
+
+```text
+Spring Boot
++
+Redis 7.4
++
+MySQL 8.4
++
+MyBatis-Plus
+```
+
+当前缓存读取链路：
+
+```text
+GET /api/redis/cache/users/{id}
+        ↓
+CacheAsideService
+        ↓
+查询 Redis
+        ↓
+命中？
+├── YES
+│    ↓
+│  直接返回 RedisUserProfile
+│
+└── NO
+     ↓
+   UserProfileMapper.selectById(id)
+     ↓
+   查询 MySQL
+     ↓
+   转换为 RedisUserProfile
+     ↓
+   RedisTemplate 自动序列化
+     ↓
+   写入 Redis + 10 分钟 TTL
+     ↓
+   返回
+```
+
+数据库仍然是主数据源，Redis 是可重新构建的缓存副本。
+
+## MySQL 数据模型
+
+当前表：
+
+```text
+user_profile
+├── id
+├── username
+└── age
+```
+
+MyBatis-Plus Entity：
+
+```text
+entity/UserProfile.java
+```
+
+Mapper：
+
+```java
+@Mapper
+public interface UserProfileMapper
+        extends BaseMapper<UserProfile> {
+}
+```
+
+查询使用：
+
+```java
+userProfileMapper.selectById(id);
+```
+
+## Cache Aside Service
+
+当前核心读取逻辑：
+
+```java
+public RedisUserProfile getUser(Long id) {
+
+    String key = "user:profile:" + id;
+
+    Object cachedValue =
+            objectRedisTemplate.opsForValue().get(key);
+
+    if (cachedValue != null) {
+        log.info("CACHE HIT, key={}", key);
+
+        if (cachedValue instanceof RedisUserProfile profile) {
+            return profile;
+        }
+
+        throw new IllegalStateException(
+                "Redis 缓存数据类型异常, key=" + key
+        );
+    }
+
+    log.info("CACHE MISS, key={}", key);
+    log.info("QUERY DATABASE, userId={}", id);
+
+    UserProfile entity =
+            userProfileMapper.selectById(id);
+
+    if (entity == null) {
+        return null;
+    }
+
+    RedisUserProfile profile =
+            new RedisUserProfile(
+                    entity.getId(),
+                    entity.getUsername(),
+                    entity.getAge()
+            );
+
+    objectRedisTemplate.opsForValue().set(
+            key,
+            profile,
+            Duration.ofMinutes(10)
+    );
+
+    log.info("CACHE REBUILD, key={}", key);
+
+    return profile;
+}
+```
+
+## Controller 接口
+
+```text
+GET /api/redis/cache/users/{id}
+```
+
+当前测试 Key：
+
+```text
+user:profile:1001
+```
+
+## 已验证内容
+
+第一次请求并确保 Redis 无缓存时：
+
+```text
+CACHE MISS
+↓
+QUERY DATABASE
+↓
+MyBatis-Plus SELECT
+↓
+CACHE REBUILD
+```
+
+实际验证 SQL：
+
+```sql
+SELECT id, username, age
+FROM user_profile
+WHERE id = ?
+```
+
+第二次请求相同用户：
+
+```text
+CACHE HIT
+```
+
+并验证 MySQL 不再执行对应的 `SELECT`。
+
+同时验证缓存 TTL：
+
+```text
+0 < TTL <= 600
+```
+
+## 缓存旧数据实验
+
+在 Redis 已经存在用户缓存后，直接修改 MySQL：
+
+```sql
+UPDATE user_profile
+SET username = 'new-name'
+WHERE id = 1001;
+```
+
+在没有删除缓存的情况下再次查询，仍然命中 Redis 中的旧数据。
+
+手动执行：
+
+```redis
+DEL user:profile:1001
+```
+
+下一次请求重新经历：
+
+```text
+CACHE MISS
+↓
+MySQL
+↓
+读取新值
+↓
+CACHE REBUILD
+```
+
+从而验证了：
+
+```text
+数据库更新
++
+缓存未失效
+→ 可能读取旧缓存
+```
+
+以及：
+
+```text
+缓存失效
+→ 下一次读取重新从数据库构建缓存
+```
+
+> 当前项目已实现并验证 Cache Aside 的读取、回源和缓存重建流程；数据库更新后的缓存删除目前通过实验手动执行，尚未实现正式的“更新数据库 + 删除缓存”业务写接口。该部分将在后续 Redis + MySQL 缓存一致性模块继续实现。
+
+## Cache Hit / Cache Miss
+
+```text
+Cache Hit
+→ Redis 中存在目标缓存
+→ 直接返回
+→ 不访问数据库
+
+Cache Miss
+→ Redis 中不存在目标缓存
+→ 查询数据库
+→ 回填 Redis
+```
+
+正常的 Cache Miss 是 Cache Aside 的标准流程，并不等同于缓存击穿。
+
+缓存击穿通常强调：
+
+```text
+热点 Key 失效
++
+高并发请求
++
+大量请求同时回源数据库
+```
+
+## 注意事项
+
+- 当前缓存 TTL 为 10 分钟。
+- 当前缓存 Value 统一通过 `objectRedisTemplate` 的 JSON Serializer 处理。
+- Cache Aside 本身不会自动保证 Redis 与 MySQL 强一致。
+- 当前不存在的用户不会被缓存，请求不存在 ID 时仍会继续查询 MySQL；该问题将在缓存穿透模块处理。
+- 当前尚未处理热点 Key 失效后的高并发回源问题；该问题将在缓存击穿模块处理。
+- 当前尚未实现数据库写操作与缓存失效的并发一致性策略。
+
+---
+
 # 当前 Controller API
 
 统一前缀：
@@ -1725,6 +2175,10 @@ GET key3
 
 /pipeline
 /pipeline/get
+
+/template/object
+
+/cache/users/{id}
 ```
 
 ---
@@ -1765,21 +2219,19 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. RedisTemplate / StringRedisTemplate / Serializer
-2. Cache Aside
-3. 缓存穿透、击穿、雪崩
-4. Redis + MySQL 缓存一致性
-5. TTL 与内存淘汰策略
-6. 分布式锁
-7. Lua
-8. MULTI / EXEC / WATCH
-9. RDB / AOF
-10. 主从复制
-11. Sentinel
-12. Redis Cluster
-13. Hot Key / Big Key / Slowlog
-14. ACL、连接池、超时、重试、监控
-15. Spring Boot 日志规范、SLF4J、Logback、AOP 请求链路日志
+1. 缓存穿透、击穿、雪崩
+2. Redis + MySQL 缓存一致性
+3. TTL 与内存淘汰策略
+4. 分布式锁
+5. Lua
+6. MULTI / EXEC / WATCH
+7. RDB / AOF
+8. 主从复制
+9. Sentinel
+10. Redis Cluster
+11. Hot Key / Big Key / Slowlog
+12. ACL、连接池、超时、重试、监控
+13. Spring Boot 日志规范、SLF4J、Logback、AOP 请求链路日志
 
 ---
 

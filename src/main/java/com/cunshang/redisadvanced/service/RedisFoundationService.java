@@ -10,6 +10,7 @@ import org.springframework.data.redis.connection.stream.RecordId;
 import org.springframework.data.geo.Distance;
 import org.springframework.data.geo.Point;
 import org.springframework.data.redis.core.RedisCallback;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.domain.geo.Metrics;
 import org.springframework.stereotype.Service;
@@ -28,10 +29,12 @@ public class RedisFoundationService {
 
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
+    private final RedisTemplate<String, Object> objectRedisTemplate;
 
-    public RedisFoundationService(StringRedisTemplate redisTemplate, ObjectMapper objectMapper) {
+    public RedisFoundationService(StringRedisTemplate redisTemplate, ObjectMapper objectMapper, RedisTemplate<String, Object> objectRedisTemplate) {
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
+        this.objectRedisTemplate = objectRedisTemplate;
     }
 
     /**
@@ -631,5 +634,27 @@ public class RedisFoundationService {
                     return null;
                 }
         );
+    }
+
+
+    //  自动序列化写入 && 自动反序列化读取 ==================================================
+    //  我已经在配置类里面写好的对应参数的 Serializer
+
+
+    /**
+     * 通过 RedisTemplate 的 JSON Serializer 自动将 Java 对象序列化后写入 Redis。
+     */
+    public void templateObjectSet(String key, RedisUserProfile profile) {
+        objectRedisTemplate.opsForValue().set(key, profile);
+    }
+
+    /**
+     * 通过 RedisTemplate 自动反序列化 Redis 中的 JSON。
+     */
+    public Object templateObjectGet(String key) {
+        //return objectRedisTemplate.opsForValue().get(key);
+        Object value = objectRedisTemplate.opsForValue().get(key);
+        System.out.println(value.getClass());
+        return value;
     }
 }
