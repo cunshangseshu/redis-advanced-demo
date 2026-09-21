@@ -126,6 +126,8 @@ Actuator 当前开放：
 | GEO | ✅ |
 | Stream | ✅ |
 | Spring Boot Redis 对象存储与序列化 | ✅ |
+| Pipeline / 批量操作 | ✅ |
+| RedisTemplate / StringRedisTemplate / Serializer | ⏳ |
 | Cache Aside | ⏳ |
 | 缓存穿透 / 击穿 / 雪崩 | ⏳ |
 | Redis + MySQL 缓存一致性 | ⏳ |
@@ -1371,6 +1373,9 @@ public RedisUserProfile objectGet(
 
 ```text
 POST /api/redis/object
+
+/pipeline
+/pipeline/get
 ```
 
 其中：
@@ -1387,6 +1392,9 @@ RedisUserProfile
 
 ```text
 GET /api/redis/object
+
+/pipeline
+/pipeline/get
 ```
 
 ## 已验证内容
@@ -1436,6 +1444,225 @@ Redis 中实际可看到类似：
 - JSON 字段需要能够正确映射到目标 Java 类型。
 - 当前只实现基础对象存取，尚未引入统一 RedisTemplate 序列化配置、泛型对象处理、版本兼容策略等进一步内容。
 - 这一能力会作为后续 Cache Aside 与 Redis + MySQL 缓存学习的基础。
+
+---
+
+
+# Redis Pipeline / 批量操作
+
+## 特点
+
+Pipeline 主要用于：
+
+```text
+减少大量 Redis 命令产生的网络往返次数（RTT）
+```
+
+普通执行：
+
+```text
+命令 1 → Redis → 返回
+命令 2 → Redis → 返回
+命令 3 → Redis → 返回
+```
+
+Pipeline：
+
+```text
+命令 1
+命令 2
+命令 3
+   ↓
+集中发送
+   ↓
+Redis 依次执行
+   ↓
+统一返回结果
+```
+
+需要注意：
+
+```text
+Pipeline ≠ Redis 事务
+```
+
+Pipeline 主要解决的是批量命令的通信效率问题，不提供“全部成功或全部回滚”的事务原子性。
+
+当前项目通过：
+
+```java
+redisTemplate.executePipelined(...)
+```
+
+实现 Pipeline。
+
+## 已实现功能
+
+| 能力 | Service 方法 | 功能 |
+|---|---|---|
+| Pipeline 批量 SET | `pipelineSet()` | 批量写入多个 String Key |
+| Pipeline 批量 GET | `pipelineGet()` | 批量读取多个 String Key |
+
+## 核心代码
+
+### 批量 SET
+
+```java
+public List<Object> pipelineSet(
+        Map<String, String> data
+) {
+    return redisTemplate.executePipelined(
+            (RedisCallback<Object>) connection -> {
+
+                StringRedisConnection stringConnection =
+                        (StringRedisConnection) connection;
+
+                for (Map.Entry<String, String> entry : data.entrySet()) {
+                    stringConnection.set(
+                            entry.getKey(),
+                            entry.getValue()
+                    );
+                }
+
+                return null;
+            }
+    );
+}
+```
+
+### 批量 GET
+
+```java
+public List<Object> pipelineGet(
+        List<String> keys
+) {
+    return redisTemplate.executePipelined(
+            (RedisCallback<Object>) connection -> {
+
+                StringRedisConnection stringConnection =
+                        (StringRedisConnection) connection;
+
+                for (String key : keys) {
+                    stringConnection.get(key);
+                }
+
+                return null;
+            }
+    );
+}
+```
+
+这里保留 `executePipelined()` 的 Lambda Callback，但内部批量命令采用普通 `for` 循环，使每一条 Redis 操作更加直观。
+
+## Controller 接口
+
+批量写入：
+
+```text
+POST /api/redis/pipeline
+```
+
+请求体示例：
+
+```json
+{
+  "demo:pipeline:1": "A",
+  "demo:pipeline:2": "B",
+  "demo:pipeline:3": "C"
+}
+```
+
+批量读取：
+
+```text
+POST /api/redis/pipeline/get
+```
+
+请求体示例：
+
+```json
+[
+  "demo:pipeline:1",
+  "demo:pipeline:2",
+  "demo:pipeline:3"
+]
+```
+
+## 已验证内容
+
+测试 Key：
+
+```text
+demo:pipeline:1
+demo:pipeline:2
+demo:pipeline:3
+demo:pipeline:not-found
+```
+
+已完成：
+
+```text
+Pipeline 批量 SET
+Redis 实际数据写入验证
+Pipeline 批量 GET
+返回结果与命令提交顺序对应
+不存在 Key 返回 null
+不存在 Key 不影响其他 GET 命令结果
+```
+
+批量 GET 示例：
+
+```json
+[
+  "A",
+  null,
+  "C"
+]
+```
+
+说明 Pipeline 中的多条 Redis 命令仍然是独立命令，一个不存在的 Key 不会让其他 GET 自动失败或回滚。
+
+## Pipeline 与批量命令
+
+需要区分：
+
+```text
+MGET key1 key2 key3
+```
+
+属于：
+
+```text
+Redis 自身的一条批量命令
+```
+
+而 Pipeline：
+
+```text
+GET key1
+GET key2
+GET key3
+```
+
+仍然是多条独立命令，只是由客户端集中发送和统一接收结果。
+
+## 可应用场景（示例）
+
+- 批量写入多个缓存 Key
+- 批量读取多个独立缓存 Key
+- 批量写入简单状态数据
+- 批量处理大量独立 Redis 命令
+
+> 当前项目只实现并验证了 Pipeline 批量 String SET / GET 能力，上述内容属于可应用方向示例，并非已经实现的完整批量缓存业务。
+
+## 注意事项
+
+- Pipeline 的核心价值是减少网络 RTT，而不是让 Redis 单条命令执行得更快。
+- Pipeline 中仍然是多条独立 Redis 命令。
+- Pipeline 不提供事务原子性，也不会因为某条命令失败自动回滚之前的命令。
+- `executePipelined()` 的 Callback 返回 `null`，真正的 Redis 命令结果由 `executePipelined()` 统一收集。
+- Pipeline 返回结果与命令提交顺序对应。
+- 批量数据非常大时不应无限堆入单个 Pipeline，真实项目通常需要考虑分批执行。
 
 ---
 
@@ -1495,6 +1722,9 @@ Redis 中实际可看到类似：
 /stream/size
 
 /object
+
+/pipeline
+/pipeline/get
 ```
 
 ---
@@ -1535,7 +1765,7 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. Pipeline / 批量操作
+1. RedisTemplate / StringRedisTemplate / Serializer
 2. Cache Aside
 3. 缓存穿透、击穿、雪崩
 4. Redis + MySQL 缓存一致性

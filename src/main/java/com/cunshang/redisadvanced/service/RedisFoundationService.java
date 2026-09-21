@@ -4,6 +4,7 @@ import com.cunshang.redisadvanced.model.RedisUserProfile;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.data.domain.Range;
+import org.springframework.data.redis.connection.StringRedisConnection;
 import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.connection.stream.RecordId;
 import org.springframework.data.geo.Distance;
@@ -590,5 +591,45 @@ public class RedisFoundationService {
     public long streamSize(String key) {
         Long size = redisTemplate.opsForStream().size(key);
         return size == null ? 0L : size;
+    }
+
+
+    //  pipeline 实现批量 update/get 数据，关联中间件 redis=================================
+
+
+    /**
+     * 使用 Pipeline 批量写入 String 数据。
+     * <p>
+     * Pipeline 主要用于减少大量 Redis 命令产生的网络往返，
+     * 不提供事务原子性。
+     */
+    public List<Object> pipelineSet(Map<String, String> data) {
+        return redisTemplate.executePipelined(
+                (RedisCallback<Object>) connection -> {
+                    StringRedisConnection stringConnection = (StringRedisConnection) connection;
+                    for (Map.Entry<String, String> entry : data.entrySet()) {
+                        stringConnection.set(
+                                entry.getKey(),
+                                entry.getValue()
+                        );
+                    }
+                    return null;
+                }
+        );
+    }
+
+    /**
+     * 使用 Pipeline 批量读取多个 String Key，输出结果是相对应的；
+     */
+    public List<Object> pipelineGet(List<String> keys) {
+        return redisTemplate.executePipelined(
+                (RedisCallback<Object>) connection -> {
+                    StringRedisConnection stringConnection = (StringRedisConnection) connection;
+                    for (String key : keys) {
+                        stringConnection.get(key);
+                    }
+                    return null;
+                }
+        );
     }
 }

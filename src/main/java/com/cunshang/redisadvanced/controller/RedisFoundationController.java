@@ -586,4 +586,24 @@ public class RedisFoundationController {
     public ApiResponse<RedisUserProfile> objectGet(@RequestParam String key) {
         return ApiResponse.success(redisService.objectGet(key));
     }
+
+
+    //  pipeline 实现批量 update/get 数据，关联中间件 redis=================================
+
+
+    /**
+     * 使用 Pipeline 批量写入多个 String Key。
+     */
+    @PostMapping("/pipeline")
+    public ApiResponse<List<Object>> pipelineSet(@RequestBody Map<String, String> data) {
+        return ApiResponse.success(redisService.pipelineSet(data));
+    }
+
+    /**
+     * 使用 Pipeline 批量读取多个 String Key。
+     */
+    @PostMapping("/pipeline/get")
+    public ApiResponse<List<Object>> pipelineGet(@RequestBody List<String> keys) {
+        return ApiResponse.success(redisService.pipelineGet(keys));
+    }
 }
