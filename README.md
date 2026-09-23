@@ -2,7 +2,7 @@
 
 基于 **Java 21 + Spring Boot 3.5.16 + Spring Data Redis + Redis 7.4** 的 Redis 学习与实践项目。
 
-本项目以“**边学、边写、边验证**”为核心方式，通过 Controller → Service → Redis / MySQL 的完整调用链，逐步学习 Redis 的常用数据结构、序列化、缓存、分布式锁、高可用与集群等内容。
+本项目以“**边学、边写、边验证**”为核心方式，通过 Controller → Service → Redis / MySQL 的完整调用链，逐步学习 Redis 的常用数据结构、序列化、缓存保护、分布式锁、高可用与集群等内容。
 
 ---
 
@@ -161,7 +161,7 @@ Actuator 当前开放：
 | Pipeline / 批量操作 | ✅ |
 | RedisTemplate / StringRedisTemplate / Serializer | ✅ |
 | Cache Aside | ✅ |
-| 缓存穿透 / 击穿 / 雪崩 | ⏳ |
+| 缓存穿透 / 击穿 / 雪崩 | ✅ |
 | Redis + MySQL 缓存一致性 | ⏳ |
 | 分布式锁 | ⏳ |
 | Lua / MULTI / EXEC / WATCH | ⏳ |
@@ -2025,10 +2025,16 @@ CACHE HIT
 
 并验证 MySQL 不再执行对应的 `SELECT`。
 
-同时验证缓存 TTL：
+同时验证缓存 TTL。
+
+在后续缓存雪崩防护中，正常缓存 TTL 已改为：
 
 ```text
-0 < TTL <= 600
+基础 TTL：600 秒
++
+随机扰动：0 ~ 120 秒
+=
+最终 TTL：600 ~ 720 秒
 ```
 
 ## 缓存旧数据实验
@@ -2107,12 +2113,449 @@ Cache Miss
 
 ## 注意事项
 
-- 当前缓存 TTL 为 10 分钟。
+- 当前正常缓存采用基础 TTL + 随机扰动，基础值为 10 分钟，并增加随机 TTL 以降低大量 Key 集中过期风险。
 - 当前缓存 Value 统一通过 `objectRedisTemplate` 的 JSON Serializer 处理。
 - Cache Aside 本身不会自动保证 Redis 与 MySQL 强一致。
-- 当前不存在的用户不会被缓存，请求不存在 ID 时仍会继续查询 MySQL；该问题将在缓存穿透模块处理。
-- 当前尚未处理热点 Key 失效后的高并发回源问题；该问题将在缓存击穿模块处理。
+- 当前对数据库中不存在的用户使用空值缓存，并设置较短 TTL，降低重复无效请求持续回源 MySQL 的风险。
+- 当前已使用 Redis Mutex + Double Check 保护热点 Key 的缓存重建，避免大量并发请求同时回源 MySQL。
 - 当前尚未实现数据库写操作与缓存失效的并发一致性策略。
+
+---
+
+
+# 缓存穿透 / 缓存击穿 / 缓存雪崩
+
+这一阶段基于现有 `CacheAsideService` 继续完善缓存保护能力，并通过 Redis、MySQL、MyBatis-Plus 与 JMeter 进行实际验证。
+
+三类问题的核心区别：
+
+| 问题 | 本质 |
+|---|---|
+| 缓存穿透 | 请求的数据在 Redis 和数据库中都不存在 |
+| 缓存击穿 | 某一个热点 Key 失效后，大量并发请求同时回源数据库 |
+| 缓存雪崩 | 大量 Key 集中过期，或 Redis 整体不可用，导致大量请求回源 |
+
+---
+
+## 缓存穿透
+
+### 问题
+
+如果请求一个数据库中不存在的用户：
+
+```text
+GET /api/redis/cache/users/999999
+```
+
+未做保护时：
+
+```text
+Redis MISS
+↓
+MySQL MISS
+↓
+返回 null
+```
+
+下一次请求仍然会重复：
+
+```text
+Redis MISS
+↓
+MySQL MISS
+```
+
+因此不存在的数据会持续穿过缓存层并访问数据库。
+
+### 当前实现：空值缓存
+
+项目使用特殊空值标记：
+
+```java
+private static final String NULL_CACHE_VALUE = "NULL";
+```
+
+数据库未查询到数据时，将空值写入 Redis，并设置较短 TTL：
+
+```java
+if (entity == null) {
+
+    objectRedisTemplate.opsForValue().set(
+            key,
+            NULL_CACHE_VALUE,
+            Duration.ofMinutes(2)
+    );
+
+    log.info("CACHE NULL REBUILD, key={}", key);
+
+    return null;
+}
+```
+
+读取缓存时优先识别空值：
+
+```java
+if (NULL_CACHE_VALUE.equals(cachedValue)) {
+    log.info("CACHE NULL HIT, key={}", key);
+    return null;
+}
+```
+
+### 已验证
+
+第一次请求不存在用户：
+
+```text
+CACHE MISS
+↓
+QUERY DATABASE
+↓
+CACHE NULL REBUILD
+```
+
+第二次请求相同不存在用户：
+
+```text
+CACHE HIT
+↓
+CACHE NULL HIT
+```
+
+第二次不会再次执行 MySQL `SELECT`。
+
+### 注意事项
+
+- 空值缓存适合降低重复无效请求对数据库的压力。
+- 空值 TTL 通常应短于正常缓存 TTL。
+- “当前不存在”不代表永远不存在，因此不应长期缓存空值。
+- 大量随机不存在 ID 的恶意请求仍可能产生大量首次回源请求，后续可以继续学习 Bloom Filter 等方案。
+
+---
+
+## 缓存击穿
+
+### 问题
+
+热点 Key 失效时，如果大量并发请求同时进入：
+
+```text
+Thread-1 → Redis MISS
+Thread-2 → Redis MISS
+Thread-3 → Redis MISS
+...
+```
+
+所有线程都可能同时执行：
+
+```text
+userProfileMapper.selectById(id)
+```
+
+从而导致同一个热点数据在极短时间内被大量重复查询。
+
+### JMeter 问题复现
+
+使用 JMeter 5.6.3：
+
+```text
+Threads：20
+Ramp-Up：1 秒
+Loop Count：1
+Synchronizing Timer：20 个线程同时放行
+```
+
+目标接口：
+
+```text
+GET /api/redis/cache/users/1001
+```
+
+在未加入击穿保护时，实际观察到：
+
+```text
+CACHE MISS       ≈ 20 次
+QUERY DATABASE   ≈ 20 次
+SELECT           ≈ 20 次
+CACHE REBUILD    ≈ 20 次
+```
+
+说明同一个热点 Key 失效后，多个并发请求同时回源 MySQL。
+
+### 当前实现：Redis Mutex
+
+项目使用 Redis `SET NX + TTL` 思路实现教学版互斥锁：
+
+```java
+private boolean tryLock(String lockKey) {
+
+    Boolean success =
+            objectRedisTemplate.opsForValue()
+                    .setIfAbsent(
+                            lockKey,
+                            "LOCK",
+                            LOCK_TTL
+                    );
+
+    return Boolean.TRUE.equals(success);
+}
+```
+
+概念上对应：
+
+```redis
+SET lock:user:profile:1001 LOCK NX EX 10
+```
+
+作用：
+
+```text
+多个线程同时 CACHE MISS
+↓
+只有一个线程获得缓存重建资格
+↓
+该线程查询 MySQL 并重建缓存
+↓
+其他线程等待
+```
+
+### Double Check
+
+线程获得锁后不会直接查询数据库，而是再次检查 Redis：
+
+```text
+第一次 Check
+→ 抢锁之前检查缓存
+
+第二次 Check
+→ 获得锁之后再次检查缓存
+```
+
+原因：
+
+```text
+线程 A 获得锁
+↓
+查询 MySQL
+↓
+重建 Redis
+↓
+释放锁
+
+线程 B 后续获得锁
+↓
+再次检查 Redis
+↓
+发现 A 已经完成重建
+↓
+直接使用缓存
+```
+
+避免线程 B 再次无意义查询数据库。
+
+### JMeter 优化后验证
+
+使用完全相同的 20 并发测试条件，实际日志结果：
+
+```text
+CACHE MISS              = 20 次
+LOCK ACQUIRED           = 1 次
+QUERY DATABASE          = 1 次
+SELECT                  = 1 次
+CACHE REBUILD           = 1 次
+LOCK RELEASED           = 1 次
+CACHE HIT AFTER WAIT    = 19 次
+```
+
+因此实际验证：
+
+```text
+优化前：
+20 并发
+→ 20 次 SELECT
+
+优化后：
+20 并发
+→ 1 次 SELECT
+```
+
+说明 Mutex + Double Check 已有效避免同一个热点 Key 的大量并发请求同时回源数据库。
+
+### 教学实验说明
+
+为放大并发现象，测试阶段曾临时在数据库查询前加入：
+
+```java
+Thread.sleep(500);
+```
+
+该代码仅用于复现缓存击穿，验收后应删除，不属于正式业务逻辑。
+
+### 当前锁实现的边界
+
+当前 `unlock()` 为教学版实现：
+
+```java
+objectRedisTemplate.delete(lockKey);
+```
+
+目前还没有解决：
+
+```text
+锁超时
+↓
+其他线程获得新锁
+↓
+旧线程执行结束
+↓
+误删其他线程持有的锁
+```
+
+该问题不会在缓存击穿章节提前展开。
+
+后续分布式锁专项会继续学习：
+
+```text
+唯一锁 Value
+→ 锁所有权
+→ Lua 原子校验并删除
+→ Redisson
+→ Watchdog
+→ 可重入锁
+```
+
+---
+
+## 缓存雪崩
+
+### 问题
+
+如果大量缓存使用完全相同的 TTL，并且在相近时间写入：
+
+```text
+user:1001 → 600 秒
+user:1002 → 600 秒
+user:1003 → 600 秒
+user:1004 → 600 秒
+...
+```
+
+可能在相近时间集中失效：
+
+```text
+大量 Key 同时过期
+↓
+大量 CACHE MISS
+↓
+大量请求回源 MySQL
+```
+
+这属于缓存雪崩的一种常见场景。
+
+### 当前实现：TTL Jitter
+
+项目在正常缓存的基础 TTL 上增加随机扰动：
+
+```java
+private static final Duration CACHE_BASE_TTL =
+        Duration.ofMinutes(10);
+
+private static final long CACHE_TTL_JITTER_SECONDS =
+        120;
+```
+
+生成随机 TTL：
+
+```java
+private Duration buildCacheTtl() {
+
+    long jitterSeconds =
+            ThreadLocalRandom.current()
+                    .nextLong(
+                            0,
+                            CACHE_TTL_JITTER_SECONDS + 1
+                    );
+
+    return CACHE_BASE_TTL.plusSeconds(jitterSeconds);
+}
+```
+
+最终正常缓存 TTL：
+
+```text
+600 ~ 720 秒
+```
+
+例如：
+
+```text
+user:1001 → 617 秒
+user:1002 → 684 秒
+user:1003 → 631 秒
+user:1004 → 709 秒
+```
+
+这样可以将大量缓存的过期时间打散，降低集中失效产生的瞬时数据库压力。
+
+### 已验证
+
+通过多个不同用户 Key 写入缓存后查询 TTL，验证不同 Key 的剩余 TTL 不再完全一致。
+
+### TTL Jitter 的边界
+
+随机 TTL 解决的是：
+
+```text
+大量 Key 集中过期
+```
+
+但不能解决：
+
+```text
+Redis 整体不可用
+```
+
+如果 Redis 整体故障：
+
+```text
+Redis DOWN
+↓
+大量缓存访问失败
+↓
+请求可能直接回源数据库
+```
+
+工程上还需要继续配合：
+
+```text
+Redis 高可用
+限流
+熔断
+降级
+本地缓存
+缓存预热
+Sentinel / Cluster
+```
+
+这些能力将在后续模块继续学习。
+
+---
+
+## 当前缓存保护总结
+
+```text
+缓存穿透
+→ 空值缓存 + 短 TTL
+
+缓存击穿
+→ Redis Mutex + Double Check
+
+缓存雪崩
+→ 基础 TTL + 随机 TTL Jitter
+```
+
+当前实现重点用于理解并验证缓存保护机制。
+
+其中缓存击穿使用的 Redis 锁仍为教学版本，完整的生产级分布式锁能力将在后续专项继续完善。
 
 ---
 
@@ -2219,19 +2662,20 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. 缓存穿透、击穿、雪崩
-2. Redis + MySQL 缓存一致性
-3. TTL 与内存淘汰策略
-4. 分布式锁
-5. Lua
-6. MULTI / EXEC / WATCH
-7. RDB / AOF
-8. 主从复制
-9. Sentinel
-10. Redis Cluster
-11. Hot Key / Big Key / Slowlog
-12. ACL、连接池、超时、重试、监控
-13. Spring Boot 日志规范、SLF4J、Logback、AOP 请求链路日志
+1. Redis + MySQL 缓存一致性
+2. TTL 与内存淘汰策略
+3. 分布式锁
+4. Lua
+5. MULTI / EXEC / WATCH
+6. RDB / AOF
+7. 主从复制
+8. Sentinel
+9. Redis Cluster
+10. Hot Key / Big Key / Slowlog
+11. ACL、连接池、超时、重试、监控
+12. Spring IoC / DI / Bean 生命周期 / ApplicationContext
+13. Spring AOP / 代理机制 / Pointcut / Advice / 常见失效场景
+14. Spring Boot 日志规范、SLF4J、Logback、AOP 请求链路日志
 
 ---
 
