@@ -2,6 +2,7 @@ package com.cunshang.redisadvanced.controller;
 
 import com.cunshang.redisadvanced.common.ApiResponse;
 import com.cunshang.redisadvanced.model.RedisUserProfile;
+import com.cunshang.redisadvanced.model.request.UpdateUserProfileRequest;
 import com.cunshang.redisadvanced.service.CacheAsideService;
 import com.cunshang.redisadvanced.service.RedisFoundationService;
 
@@ -17,6 +18,7 @@ import java.util.Set;
 public class RedisFoundationController {
     private final RedisFoundationService redisService;
     private final CacheAsideService cacheAsideService;
+
     public RedisFoundationController(
             RedisFoundationService redisService,
             CacheAsideService cacheAsideService
@@ -641,5 +643,15 @@ public class RedisFoundationController {
     @GetMapping("/cache/users/{id}")
     public ApiResponse<RedisUserProfile> getCachedUser(@PathVariable Long id) {
         return ApiResponse.success(cacheAsideService.getUser(id));
+    }
+
+
+    @PutMapping("/cache/users/{id}")
+    public ApiResponse<Void> updateCachedUser(
+            @PathVariable Long id,
+            @RequestBody UpdateUserProfileRequest request
+    ) {
+        cacheAsideService.updateUser(id, request.username(), request.age());
+        return ApiResponse.success(null);
     }
 }

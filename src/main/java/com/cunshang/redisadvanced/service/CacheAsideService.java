@@ -24,6 +24,8 @@ public class CacheAsideService {
     private static final Duration LOCK_TTL = Duration.ofSeconds(10);
     private static final Duration CACHE_BASE_TTL = Duration.ofMinutes(10);
     private static final long CACHE_TTL_JITTER_SECONDS = 120;
+    private static final int CACHE_DELETE_MAX_ATTEMPTS = 3;
+    private static final long CACHE_DELETE_RETRY_DELAY_MS = 200;
 
     public CacheAsideService(@Qualifier("objectRedisTemplate") RedisTemplate<String, Object> objectRedisTemplate, UserProfileMapper userProfileMapper) {
         this.objectRedisTemplate = objectRedisTemplate;
@@ -102,7 +104,6 @@ public class CacheAsideService {
             Duration ttl = buildCacheTtl();
             objectRedisTemplate.opsForValue().set(key, profile, ttl);
             log.info("CACHE REBUILD, key={}, ttl={}s", key, ttl.toSeconds());
-            log.info("CACHE REBUILD, key={}", key);
             return profile;
         } finally {
             // 7. 无论成功还是异常都释放锁
@@ -134,5 +135,66 @@ public class CacheAsideService {
     private Duration buildCacheTtl() {
         long jitterSeconds = ThreadLocalRandom.current().nextLong(0, CACHE_TTL_JITTER_SECONDS + 1);
         return CACHE_BASE_TTL.plusSeconds(jitterSeconds);
+    }
+
+
+    public void updateUser(Long id, String username, Integer age) {
+        String key = "user:profile:" + id;
+        UserProfile entity = new UserProfile();
+        entity.setId(id);
+        entity.setUsername(username);
+        entity.setAge(age);
+        log.info("UPDATE DATABASE, userId={}, username={}, age={}", id, username, age);
+        int rows = userProfileMapper.updateById(entity); // UPDATE MySQL
+        if (rows == 0) {
+            throw new IllegalStateException("用户不存在, userId=" + id);
+        }
+        log.info("DATABASE UPDATED, userId={}", id);
+        deleteCacheWithRetry(key); // delete redis
+
+        // 模拟 Redis 缓存删除失败
+        // log.info("DATABASE UPDATED, userId={}", id);
+        // log.error("SIMULATED CACHE DELETE FAILURE, key={}", key);
+        // throw new IllegalStateException("模拟 Redis 缓存删除失败");
+    }
+
+
+    private void deleteCacheWithRetry(String key) {
+        for (int attempt = 1; attempt <= CACHE_DELETE_MAX_ATTEMPTS; attempt++) {
+            try {
+                // 模拟第一次 Redis 删除失败
+                /*if (attempt == 1) {
+                    log.error("SIMULATED CACHE DELETE FAILURE, key={}, attempt={}", key, attempt);
+                    throw new IllegalStateException("模拟第一次 Redis 删除失败");
+                }*/
+                /*if (attempt <= 3) {
+                    log.error("SIMULATED CACHE DELETE FAILURE, key={}, attempt={}", key, attempt);
+                    throw new IllegalStateException("模拟 Redis 删除失败, attempt=" + attempt);
+                }*/
+                Boolean deleted = objectRedisTemplate.delete(key);
+                log.info("CACHE INVALIDATED, key={}, existed={}, attempt={}",
+                        key,
+                        deleted,
+                        attempt
+                );
+                return;
+            } catch (Exception e) {
+                log.warn("CACHE DELETE FAILED, key={}, attempt={}/{}",
+                        key,
+                        attempt,
+                        CACHE_DELETE_MAX_ATTEMPTS,
+                        e
+                );
+                if (attempt == CACHE_DELETE_MAX_ATTEMPTS) {
+                    throw new IllegalStateException("缓存删除重试仍然失败, key=" + key, e);
+                }
+                try {
+                    Thread.sleep(CACHE_DELETE_RETRY_DELAY_MS);
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("缓存删除重试等待被中断", interruptedException);
+                }
+            }
+        }
     }
 }

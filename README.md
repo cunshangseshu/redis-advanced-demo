@@ -47,7 +47,9 @@ redis-advanced-demo
 │       │   ├── mapper
 │       │   │   └── UserProfileMapper.java
 │       │   ├── model
-│       │   │   └── RedisUserProfile.java
+│       │   │   ├── RedisUserProfile.java
+│       │   │   └── request
+│       │   │       └── UpdateUserProfileRequest.java
 │       │   └── service
 │       │       ├── CacheAsideService.java
 │       │       └── RedisFoundationService.java
@@ -162,7 +164,7 @@ Actuator 当前开放：
 | RedisTemplate / StringRedisTemplate / Serializer | ✅ |
 | Cache Aside | ✅ |
 | 缓存穿透 / 击穿 / 雪崩 | ✅ |
-| Redis + MySQL 缓存一致性 | ⏳ |
+| Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步删除重试已完成，异步补偿待实现） |
 | 分布式锁 | ⏳ |
 | Lua / MULTI / EXEC / WATCH | ⏳ |
 | RDB / AOF | ⏳ |
@@ -1891,7 +1893,7 @@ CacheAsideService
      ↓
    RedisTemplate 自动序列化
      ↓
-   写入 Redis + 10 分钟 TTL
+   写入 Redis + 600~720 秒随机 TTL
      ↓
    返回
 ```
@@ -1931,6 +1933,8 @@ userProfileMapper.selectById(id);
 ```
 
 ## Cache Aside Service
+
+> 下方代码用于展示最基础的 Cache Aside 读取流程。当前项目已经在后续章节继续加入空值缓存、Mutex + Double Check 与随机 TTL 等增强机制。
 
 当前核心读取逻辑：
 
@@ -1986,7 +1990,8 @@ public RedisUserProfile getUser(Long id) {
 ## Controller 接口
 
 ```text
-GET /api/redis/cache/users/{id}
+GET /api/redis/cache/users/{id}    # GET：查询用户缓存
+/cache/users/{id}    # PUT：更新 MySQL 后删除对应缓存
 ```
 
 当前测试 Key：
@@ -2083,7 +2088,7 @@ CACHE REBUILD
 → 下一次读取重新从数据库构建缓存
 ```
 
-> 当前项目已实现并验证 Cache Aside 的读取、回源和缓存重建流程；数据库更新后的缓存删除目前通过实验手动执行，尚未实现正式的“更新数据库 + 删除缓存”业务写接口。该部分将在后续 Redis + MySQL 缓存一致性模块继续实现。
+> 当前项目已经进一步实现正式写接口：先更新 MySQL，再删除对应 Redis 缓存；缓存删除还加入了短同步重试。更完整的异步补偿机制仍将在后续继续实现。
 
 ## Cache Hit / Cache Miss
 
@@ -2559,6 +2564,365 @@ Sentinel / Cluster
 
 ---
 
+
+# Redis + MySQL 缓存一致性（当前阶段）
+
+这一阶段在现有 Cache Aside 基础上继续实现写路径，并通过正常更新、缓存删除失败、短同步重试等实验验证 Redis 与 MySQL 的一致性问题。
+
+## 核心原则
+
+当前采用：
+
+```text
+MySQL
+= 主数据源 / Source of Truth
+
+Redis
+= 可删除、可重建的缓存副本
+```
+
+因此写操作不直接同时维护两份数据，而是：
+
+```text
+UPDATE MySQL
+↓
+DELETE Redis
+↓
+下一次读取 Redis MISS
+↓
+重新从 MySQL 加载最新值
+↓
+CACHE REBUILD
+```
+
+当前项目不采用：
+
+```text
+UPDATE MySQL
++
+UPDATE Redis
+```
+
+作为主方案，避免业务代码长期承担“双写两份数据”的同步责任。
+
+---
+
+## 已实现写接口
+
+当前接口：
+
+```text
+PUT /api/redis/cache/users/{id}    # GET：查询用户缓存
+/cache/users/{id}    # PUT：更新 MySQL 后删除对应缓存
+```
+
+请求对象：
+
+```text
+model/request/UpdateUserProfileRequest.java
+```
+
+示例请求：
+
+```json
+{
+  "username": "cache-consistency-test",
+  "age": 25
+}
+```
+
+核心业务顺序：
+
+```java
+int rows = userProfileMapper.updateById(entity);
+
+if (rows == 0) {
+    throw new IllegalStateException(
+            "用户不存在, userId=" + id
+    );
+}
+
+deleteCacheWithRetry(key);
+```
+
+也就是：
+
+```text
+UPDATE MySQL
+↓
+DELETE Redis
+```
+
+---
+
+## 正常写路径验证
+
+实验前先确保目标用户已经存在 Redis 缓存。
+
+执行：
+
+```text
+PUT /api/redis/cache/users/1001
+```
+
+验证日志：
+
+```text
+UPDATE DATABASE
+↓
+MyBatis-Plus UPDATE
+↓
+DATABASE UPDATED
+↓
+CACHE INVALIDATED
+```
+
+此时状态：
+
+```text
+MySQL = 新数据
+Redis = 无缓存
+```
+
+随后再次请求：
+
+```text
+GET /api/redis/cache/users/1001
+```
+
+会重新经历：
+
+```text
+CACHE MISS
+↓
+QUERY DATABASE
+↓
+读取 MySQL 最新值
+↓
+CACHE REBUILD
+```
+
+从而恢复为：
+
+```text
+MySQL = 新数据
+Redis = 新缓存
+```
+
+这验证了当前 Cache Aside 写路径：
+
+```text
+更新数据库
++
+让旧缓存失效
++
+由后续读请求重新构建缓存
+```
+
+---
+
+## 缓存删除失败实验
+
+为了验证一致性风险，实验阶段曾临时模拟：
+
+```text
+MySQL UPDATE 成功
+↓
+Redis DELETE 失败
+```
+
+实际现象：
+
+```text
+MySQL = 新值
+Redis = 旧值
+```
+
+随后再次 GET：
+
+```text
+CACHE HIT
+```
+
+由于 Redis 中仍然存在旧缓存，读取请求不会立即访问 MySQL，因此用户仍可能拿到旧数据。
+
+这一实验验证：
+
+```text
+数据库更新成功
++
+缓存失效失败
+=
+可能产生短暂或持续的数据不一致
+```
+
+> 模拟删除失败的代码仅用于教学实验，不属于正常业务路径。
+
+---
+
+## 缓存删除同步重试
+
+当前项目已经为缓存删除加入最小同步重试机制：
+
+```text
+最大尝试次数：3
+重试间隔：200ms
+```
+
+整体流程：
+
+```text
+DELETE Redis
+↓
+失败？
+├── NO  → 完成
+│
+└── YES
+     ↓
+   等待 200ms
+     ↓
+   再次 DELETE
+```
+
+当前实现主要用于应对：
+
+```text
+瞬时 Redis 抖动
+短暂网络异常
+短暂连接异常
+```
+
+### 已验证：第一次失败，第二次成功
+
+实验中临时模拟第一次删除失败：
+
+```text
+attempt=1 → FAIL
+↓
+等待约 200ms
+↓
+attempt=2 → DELETE 成功
+```
+
+说明短暂故障可以通过有限次数的同步重试恢复。
+
+### 已验证：连续三次失败
+
+实验中继续模拟：
+
+```text
+attempt=1 → FAIL
+attempt=2 → FAIL
+attempt=3 → FAIL
+```
+
+最终同步重试耗尽。
+
+这一实验验证：
+
+```text
+同步短重试
+只能降低瞬时故障带来的失败概率
+
+但无法解决：
+Redis 长时间不可用
+持续网络故障
+持续服务异常
+```
+
+---
+
+## DELETE 返回 false 不等于 Redis 故障
+
+当前代码会记录：
+
+```text
+existed=true / false
+```
+
+需要区分：
+
+```text
+delete(key) == false
+```
+
+与：
+
+```text
+DELETE Redis 抛出异常
+```
+
+`false` 通常只表示：
+
+```text
+目标 Key 本来就不存在
+```
+
+而当前业务目标本身就是：
+
+```text
+让旧缓存不存在
+```
+
+因此 Key 已经不存在时，不需要继续重试。
+
+真正需要进入重试逻辑的是 Redis 命令执行过程出现异常。
+
+---
+
+## 当前方案边界
+
+当前已完成：
+
+```text
+Cache Aside 正常写路径 ✅
+UPDATE MySQL → DELETE Redis ✅
+缓存删除短同步重试 ✅
+单次失败后重试恢复实验 ✅
+连续三次失败实验 ✅
+缓存删除失败导致旧缓存继续命中的实验 ✅
+```
+
+当前尚未实现：
+
+```text
+RabbitMQ 异步缓存失效补偿
+消费者重试
+死信队列
+失败任务持久化
+定时任务兜底
+更完整的最终一致性机制
+```
+
+因此当前状态仍然属于：
+
+```text
+Redis + MySQL 缓存一致性
+= 进行中
+```
+
+下一阶段将把：
+
+```text
+同步重试仍失败
+```
+
+继续升级为：
+
+```text
+发送缓存失效消息
+↓
+RabbitMQ
+↓
+消费者异步删除 Redis
+↓
+失败继续重试 / DLQ
+↓
+必要时定时任务最终兜底
+```
+
+---
+
 # 当前 Controller API
 
 统一前缀：
@@ -2621,7 +2985,8 @@ Sentinel / Cluster
 
 /template/object
 
-/cache/users/{id}
+/cache/users/{id}    # GET：查询用户缓存
+/cache/users/{id}    # PUT：更新 MySQL 后删除对应缓存
 ```
 
 ---
@@ -2662,7 +3027,7 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. Redis + MySQL 缓存一致性
+1. Redis + MySQL 缓存一致性：RabbitMQ 异步补偿 / 消费重试 / DLQ / 定时任务兜底
 2. TTL 与内存淘汰策略
 3. 分布式锁
 4. Lua
