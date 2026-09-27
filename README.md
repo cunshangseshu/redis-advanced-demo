@@ -2,7 +2,7 @@
 
 基于 **Java 21 + Spring Boot 3.5.16 + Spring Data Redis + Redis 7.4** 的 Redis 学习与实践项目。
 
-本项目以“**边学、边写、边验证**”为核心方式，通过 Controller → Service → Redis / MySQL / RabbitMQ 的完整调用链，逐步学习 Redis 的常用数据结构、序列化、缓存保护、分布式锁、高可用与集群等内容。
+本项目以“**边学、边写、边验证**”为核心方式，通过 Controller → Service → Redis / MySQL / RabbitMQ 的完整调用链，逐步学习 Redis 的常用数据结构、序列化、缓存保护、缓存一致性、RabbitMQ 异步补偿、分布式锁、高可用与集群等内容。
 
 ---
 
@@ -18,6 +18,7 @@
 - MyBatis-Plus 3.5.17
 - RabbitMQ 4（Management）
 - Spring AMQP
+- Spring Retry
 - Docker Compose
 - Spring Boot Actuator
 - Maven
@@ -181,7 +182,7 @@ Actuator 当前开放：
 | RedisTemplate / StringRedisTemplate / Serializer | ✅ |
 | Cache Aside | ✅ |
 | 缓存穿透 / 击穿 / 雪崩 | ✅ |
-| Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步重试 + RabbitMQ 异步补偿已完成；消费者重试 / DLQ / 最终兜底待实现） |
+| Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步重试 + RabbitMQ 异步补偿 + Consumer Retry + Error Queue 已完成；最终兜底待实现） |
 | 分布式锁 | ⏳ |
 | Lua / MULTI / EXEC / WATCH | ⏳ |
 | RDB / AOF | ⏳ |
@@ -2901,15 +2902,20 @@ UPDATE MySQL → DELETE Redis ✅
 RabbitMQ 异步缓存失效补偿 ✅
 Consumer 异步删除 Redis ✅
 同步线程与 MQ 消费线程分离验证 ✅
+Consumer Retry（最多 3 次）✅
+500ms 重试间隔验证 ✅
+正常 Exchange / Queue / Binding 显式声明 ✅
+Error Exchange / Error Queue / Binding ✅
+RepublishMessageRecoverer 失败消息重新发布 ✅
 ```
 
 当前尚未实现：
 
 ```text
-消费者失败重试
-死信队列（DLQ）
+Error Queue 中失败消息的后续自动处理
+Publisher Confirm / Return
 失败任务持久化
-定时任务兜底
+定时任务最终兜底
 更完整的最终一致性机制
 ```
 
@@ -2920,30 +2926,40 @@ Redis + MySQL 缓存一致性
 = 进行中
 ```
 
-当前已完成：
+当前完整补偿链已经推进到：
 
 ```text
-同步重试仍失败
+同步删除 Redis 重试仍失败
 ↓
-发送缓存失效消息
+RabbitMQ 正常 Exchange
 ↓
-RabbitMQ
+cache.invalidation.queue
 ↓
-Consumer 异步删除 Redis
+Consumer 处理消息
+↓
+Consumer 最多尝试 3 次
+↓
+仍然失败
+↓
+RepublishMessageRecoverer
+↓
+Error Exchange
+↓
+cache.invalidation.error.queue
 ```
+
+> 当前这里使用的是 Spring 应用层的 `RepublishMessageRecoverer` 重新发布失败消息，不是 RabbitMQ Broker 原生的 `Reject → DLX → DLQ` 机制。
 
 下一阶段继续处理：
 
 ```text
-Consumer 自身删除 Redis 失败
+Error Queue 中仍未完成的缓存失效任务
 ↓
-消费者重试
+自动补偿 / 人工补偿
 ↓
-仍失败
+必要时失败任务持久化
 ↓
-DLQ
-↓
-必要时失败任务 / 定时任务最终兜底
+定时任务最终兜底
 ```
 
 ---
@@ -2982,15 +2998,27 @@ public record CacheInvalidationMessage(
 }
 ```
 
-Queue：
+当前正常消息拓扑：
 
 ```text
+cache.invalidation.exchange
+        ↓ routingKey = cache.invalidation
 cache.invalidation.queue
+        ↓
+CacheInvalidationConsumer
 ```
 
-当前 Queue 配置为 durable，用于保存队列定义。
+失败消息拓扑：
 
-消息通过 JSON MessageConverter 在 Java 对象与 RabbitMQ Message 之间完成转换。
+```text
+cache.invalidation.error.exchange
+        ↓ routingKey = cache.invalidation.error
+cache.invalidation.error.queue
+```
+
+正常 Queue 与 Error Queue 都采用 durable 声明。
+
+消息通过 JSON `MessageConverter` 在 Java 对象与 RabbitMQ Message 之间完成转换。
 
 ---
 
@@ -3096,30 +3124,202 @@ Listener Container 中的另一个线程
 
 ---
 
+
+## Consumer Retry 与失败消息重新发布
+
+为了继续验证 RabbitMQ 消费端自身处理失败的情况，当前项目为 Listener Container 增加了重试机制。
+
+当前配置：
+
+```text
+maxAttempts = 3
+backOff = 500ms
+```
+
+即：
+
+```text
+Consumer 第 1 次执行失败
+↓
+等待约 500ms
+
+Consumer 第 2 次执行失败
+↓
+等待约 500ms
+
+Consumer 第 3 次执行失败
+↓
+重试耗尽
+```
+
+实验日志中三次 Consumer 调用时间间隔约为：
+
+```text
+500ms
+500ms
+```
+
+从而验证 Spring AMQP Listener Retry 已实际生效。
+
+当前重试逻辑由 Listener Container 统一管理，业务 Consumer 不需要自己手写 `for` 循环。
+
+---
+
+## RepublishMessageRecoverer
+
+当 Consumer 连续尝试 3 次仍然失败时，当前项目使用：
+
+```java
+RepublishMessageRecoverer
+```
+
+处理最终失败消息。
+
+核心目标：
+
+```text
+Retry Exhausted
+↓
+RepublishMessageRecoverer
+↓
+重新发布消息
+↓
+cache.invalidation.error.exchange
+↓
+routingKey = cache.invalidation.error
+↓
+cache.invalidation.error.queue
+```
+
+已通过日志验证：
+
+```text
+Republishing failed message to exchange
+'cache.invalidation.error.exchange'
+with routing key cache.invalidation.error
+```
+
+这里的：
+
+```text
+Republishing failed message
+```
+
+表示：
+
+```text
+正在重新发布“处理失败的消息”
+```
+
+不是：
+
+```text
+重新发布动作本身失败
+```
+
+---
+
+## 为什么没有直接修改原 Queue 的 DLX 参数
+
+项目曾尝试在已经存在的：
+
+```text
+cache.invalidation.queue
+```
+
+上追加：
+
+```text
+x-dead-letter-exchange
+x-dead-letter-routing-key
+```
+
+这会导致 RabbitMQ 在重新声明同名 Queue 时检测到参数不一致，从而产生：
+
+```text
+PRECONDITION_FAILED
+inequivalent arg
+```
+
+当前方案改为保持原主 Queue 参数不变，并显式注册两套拓扑：
+
+```text
+正常链路：
+Exchange
+→ RoutingKey
+→ Queue
+
+失败链路：
+Error Exchange
+→ Error RoutingKey
+→ Error Queue
+```
+
+Consumer 重试耗尽后，由 `RepublishMessageRecoverer` 主动把失败消息重新发布到 Error Exchange。
+
+因此：
+
+```text
+原 cache.invalidation.queue 不需要删除
+也不需要修改原 Queue 的 x-arguments
+```
+
+当前机制属于：
+
+```text
+Spring 应用层失败消息重新发布
+```
+
+而不是：
+
+```text
+RabbitMQ Broker 原生 DLX / DLQ
+```
+
+两者最终都可以形成失败消息隔离，但触发机制不同。
+
+---
+
 ## 当前 RabbitMQ 补偿边界
 
 当前已实现：
 
 ```text
 同步删除失败 → 发送 RabbitMQ ✅
-RabbitMQ Queue ✅
+正常 Exchange / Queue / Binding ✅
+显式 RoutingKey ✅
 JSON 消息转换 ✅
 @RabbitListener Consumer ✅
 Consumer 异步删除 Redis ✅
+Consumer Retry：最多 3 次 ✅
+500ms 重试间隔 ✅
+Error Exchange / Error Queue / Binding ✅
+RepublishMessageRecoverer ✅
+重试耗尽后失败消息进入 Error Queue ✅
 ```
 
 当前还没有实现：
 
 ```text
-Consumer 删除 Redis 失败后的重试
-重试次数与退避策略
-DLQ
-消息发布确认
+Error Queue 消息自动再次补偿
+Publisher Confirm / Return
 失败任务持久化
 定时任务兜底
 ```
 
-因此当前方案属于“异步补偿第一阶段”，后续继续提高可靠性。
+因此当前方案已经从“异步补偿第一阶段”推进到：
+
+```text
+同步补偿
++
+MQ 异步补偿
++
+Consumer Retry
++
+失败消息隔离
+```
+
+但最终一致性的完整兜底链路仍在继续完善。
 
 ---
 
@@ -3227,7 +3427,7 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. Redis + MySQL 缓存一致性：Consumer 重试 / DLQ / 失败任务与定时任务兜底
+1. Redis + MySQL 缓存一致性：Error Queue 后续补偿 / Publisher Confirm / 失败任务与定时任务兜底
 2. TTL 与内存淘汰策略
 3. 分布式锁
 4. Lua

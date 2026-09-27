@@ -25,7 +25,14 @@ public class CacheInvalidationConsumer {
     public void consume(CacheInvalidationMessage message) {
         String key = message.key();
         log.info("MQ CACHE INVALIDATION RECEIVED, key={}", key);
-        Boolean deleted = objectRedisTemplate.delete(key);
-        log.info(" , key={}, existed={}", key, deleted);
+        // Boolean deleted = objectRedisTemplate.delete(key);
+        // 模拟 RabbitMQ 挂掉然后充分利用spring的重试机制；
+        log.error("SIMULATED MQ CONSUMER FAILURE, key={}", key);
+        throw new IllegalStateException("模拟 RabbitMQ Consumer 删除 Redis 失败");
+        // log.info(" , key={}, existed={}", key, deleted);
+    }
+
+    public RedisTemplate<String, Object> getObjectRedisTemplate() {
+        return objectRedisTemplate;
     }
 }
