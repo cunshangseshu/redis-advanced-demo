@@ -2,7 +2,7 @@
 
 基于 **Java 21 + Spring Boot 3.5.16 + Spring Data Redis + Redis 7.4** 的 Redis 学习与实践项目。
 
-本项目以“**边学、边写、边验证**”为核心方式，通过 Controller → Service → Redis / MySQL 的完整调用链，逐步学习 Redis 的常用数据结构、序列化、缓存保护、分布式锁、高可用与集群等内容。
+本项目以“**边学、边写、边验证**”为核心方式，通过 Controller → Service → Redis / MySQL / RabbitMQ 的完整调用链，逐步学习 Redis 的常用数据结构、序列化、缓存保护、分布式锁、高可用与集群等内容。
 
 ---
 
@@ -16,6 +16,8 @@
 - Redis 7.4
 - MySQL 8.4
 - MyBatis-Plus 3.5.17
+- RabbitMQ 4（Management）
+- Spring AMQP
 - Docker Compose
 - Spring Boot Actuator
 - Maven
@@ -36,7 +38,10 @@ redis-advanced-demo
 │       │   │   ├── ApiResponse.java
 │       │   │   └── ResultCode.java
 │       │   ├── config
-│       │   │   └── RedisConfig.java
+│       │   │   ├── RedisConfig.java
+│       │   │   ├── RabbitMqConfig.java
+│       │   │   └── mq
+│       │   │       └── CacheInvalidationConsumer.java
 │       │   ├── controller
 │       │   │   └── RedisFoundationController.java
 │       │   ├── entity
@@ -48,6 +53,8 @@ redis-advanced-demo
 │       │   │   └── UserProfileMapper.java
 │       │   ├── model
 │       │   │   ├── RedisUserProfile.java
+│       │   │   ├── message
+│       │   │   │   └── CacheInvalidationMessage.java
 │       │   │   └── request
 │       │   │       └── UpdateUserProfileRequest.java
 │       │   └── service
@@ -65,7 +72,7 @@ redis-advanced-demo
 
 ## 运行方式
 
-### 1. 启动 Redis 与 MySQL
+### 1. 启动 Redis、MySQL 与 RabbitMQ
 
 ```bash
 docker compose up -d
@@ -89,6 +96,14 @@ MySQL
 ├── 数据库：redis_learning
 ├── 字符集：utf8mb4
 └── 排序规则：utf8mb4_0900_ai_ci
+
+RabbitMQ
+├── 镜像：rabbitmq:4-management
+├── 容器名称：redis-advanced-rabbitmq
+├── AMQP 端口：5672
+├── Management 端口：15672
+├── 用户名：guest
+└── 密码：guest
 ```
 
 ### 2. 验证 Redis
@@ -131,6 +146,8 @@ SELECT * FROM user_profile;
 ```text
 Redis：localhost:6380
 MySQL：localhost:3307/redis_learning
+RabbitMQ：localhost:5672
+RabbitMQ Management：http://localhost:15672
 ```
 
 Actuator 当前开放：
@@ -164,7 +181,7 @@ Actuator 当前开放：
 | RedisTemplate / StringRedisTemplate / Serializer | ✅ |
 | Cache Aside | ✅ |
 | 缓存穿透 / 击穿 / 雪崩 | ✅ |
-| Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步删除重试已完成，异步补偿待实现） |
+| Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步重试 + RabbitMQ 异步补偿已完成；消费者重试 / DLQ / 最终兜底待实现） |
 | 分布式锁 | ⏳ |
 | Lua / MULTI / EXEC / WATCH | ⏳ |
 | RDB / AOF | ⏳ |
@@ -2612,8 +2629,8 @@ UPDATE Redis
 当前接口：
 
 ```text
-PUT /api/redis/cache/users/{id}    # GET：查询用户缓存
-/cache/users/{id}    # PUT：更新 MySQL 后删除对应缓存
+GET /api/redis/cache/users/{id}    # 查询用户缓存
+PUT /api/redis/cache/users/{id}    # 更新 MySQL 后使对应缓存失效
 ```
 
 请求对象：
@@ -2881,14 +2898,16 @@ UPDATE MySQL → DELETE Redis ✅
 单次失败后重试恢复实验 ✅
 连续三次失败实验 ✅
 缓存删除失败导致旧缓存继续命中的实验 ✅
+RabbitMQ 异步缓存失效补偿 ✅
+Consumer 异步删除 Redis ✅
+同步线程与 MQ 消费线程分离验证 ✅
 ```
 
 当前尚未实现：
 
 ```text
-RabbitMQ 异步缓存失效补偿
-消费者重试
-死信队列
+消费者失败重试
+死信队列（DLQ）
 失败任务持久化
 定时任务兜底
 更完整的最终一致性机制
@@ -2901,25 +2920,206 @@ Redis + MySQL 缓存一致性
 = 进行中
 ```
 
-下一阶段将把：
+当前已完成：
 
 ```text
 同步重试仍失败
-```
-
-继续升级为：
-
-```text
+↓
 发送缓存失效消息
 ↓
 RabbitMQ
 ↓
-消费者异步删除 Redis
-↓
-失败继续重试 / DLQ
-↓
-必要时定时任务最终兜底
+Consumer 异步删除 Redis
 ```
+
+下一阶段继续处理：
+
+```text
+Consumer 自身删除 Redis 失败
+↓
+消费者重试
+↓
+仍失败
+↓
+DLQ
+↓
+必要时失败任务 / 定时任务最终兜底
+```
+
+---
+
+
+# RabbitMQ 异步缓存失效补偿
+
+当同步删除 Redis 连续重试 3 次仍然失败时，当前项目不再让 HTTP 请求线程继续死磕，而是把“删除这个缓存 Key”的任务交给 RabbitMQ。
+
+当前链路：
+
+```text
+HTTP PUT
+↓
+UPDATE MySQL
+↓
+DELETE Redis
+↓
+同步重试 3 次仍失败
+↓
+RabbitTemplate 发送 CacheInvalidationMessage
+↓
+RabbitMQ
+↓
+CacheInvalidationConsumer
+↓
+异步 DELETE Redis
+```
+
+消息对象：
+
+```java
+public record CacheInvalidationMessage(
+        String key
+) {
+}
+```
+
+Queue：
+
+```text
+cache.invalidation.queue
+```
+
+当前 Queue 配置为 durable，用于保存队列定义。
+
+消息通过 JSON MessageConverter 在 Java 对象与 RabbitMQ Message 之间完成转换。
+
+---
+
+## 已验证异步补偿
+
+实际实验中人为让同步 Redis 删除连续失败 3 次。
+
+验证链路：
+
+```text
+DATABASE UPDATED
+↓
+CACHE DELETE FAILED, attempt=1/3
+↓
+CACHE DELETE FAILED, attempt=2/3
+↓
+CACHE DELETE FAILED, attempt=3/3
+↓
+SYNC CACHE INVALIDATION FAILED, SEND MQ
+↓
+CACHE INVALIDATION MESSAGE SENT
+↓
+MQ CACHE INVALIDATION RECEIVED
+↓
+MQ CACHE INVALIDATED, existed=true
+```
+
+其中：
+
+```text
+existed=true
+```
+
+说明 Consumer 实际删除的是一个真实存在的旧缓存 Key，而不是“Key 本来就不存在”。
+
+这一实验验证了：
+
+```text
+主请求线程未能完成缓存失效
+↓
+RabbitMQ 接管补偿任务
+↓
+Consumer 成功清理旧缓存
+```
+
+---
+
+## `nio-8080-exec-*` 与 RabbitMQ Consumer 线程
+
+日志中可以看到类似：
+
+```text
+nio-8080-exec-3
+```
+
+和：
+
+```text
+...Container#0-1
+```
+
+它们可以先这样理解：
+
+```text
+nio-8080-exec-3
+= Web 容器处理 HTTP 请求的工作线程
+
+RabbitMQ Listener Container 线程
+= Spring AMQP 用来消费消息的独立工作线程
+```
+
+因此这确实涉及多线程，但更准确地说，是：
+
+```text
+两个独立线程池 / 执行上下文
++
+RabbitMQ 作为中间异步边界
+```
+
+并不是 HTTP 线程“直接切换”成 MQ 线程。
+
+实际过程是：
+
+```text
+HTTP 请求线程
+↓
+发送消息到 RabbitMQ
+↓
+HTTP 线程可以结束自己的工作
+
+RabbitMQ 保存 / 投递消息
+↓
+Listener Container 中的另一个线程
+↓
+调用 @RabbitListener Consumer
+↓
+继续执行 Redis 删除
+```
+
+所以同一条业务链路可以跨越不同线程、不同时间点继续执行。
+
+当前实验中，这正是“异步补偿”最直观的体现。
+
+---
+
+## 当前 RabbitMQ 补偿边界
+
+当前已实现：
+
+```text
+同步删除失败 → 发送 RabbitMQ ✅
+RabbitMQ Queue ✅
+JSON 消息转换 ✅
+@RabbitListener Consumer ✅
+Consumer 异步删除 Redis ✅
+```
+
+当前还没有实现：
+
+```text
+Consumer 删除 Redis 失败后的重试
+重试次数与退避策略
+DLQ
+消息发布确认
+失败任务持久化
+定时任务兜底
+```
+
+因此当前方案属于“异步补偿第一阶段”，后续继续提高可靠性。
 
 ---
 
@@ -3027,7 +3227,7 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. Redis + MySQL 缓存一致性：RabbitMQ 异步补偿 / 消费重试 / DLQ / 定时任务兜底
+1. Redis + MySQL 缓存一致性：Consumer 重试 / DLQ / 失败任务与定时任务兜底
 2. TTL 与内存淘汰策略
 3. 分布式锁
 4. Lua

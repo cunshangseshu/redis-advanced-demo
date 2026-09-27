@@ -1,10 +1,13 @@
 package com.cunshang.redisadvanced.service;
 
+import com.cunshang.redisadvanced.config.RabbitMqConfig;
 import com.cunshang.redisadvanced.entity.UserProfile;
 import com.cunshang.redisadvanced.mapper.UserProfileMapper;
 import com.cunshang.redisadvanced.model.RedisUserProfile;
+import com.cunshang.redisadvanced.model.message.CacheInvalidationMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
@@ -26,10 +29,12 @@ public class CacheAsideService {
     private static final long CACHE_TTL_JITTER_SECONDS = 120;
     private static final int CACHE_DELETE_MAX_ATTEMPTS = 3;
     private static final long CACHE_DELETE_RETRY_DELAY_MS = 200;
+    private final RabbitTemplate rabbitTemplate;
 
-    public CacheAsideService(@Qualifier("objectRedisTemplate") RedisTemplate<String, Object> objectRedisTemplate, UserProfileMapper userProfileMapper) {
+    public CacheAsideService(@Qualifier("objectRedisTemplate") RedisTemplate<String, Object> objectRedisTemplate, UserProfileMapper userProfileMapper, RabbitTemplate rabbitTemplate) {
         this.objectRedisTemplate = objectRedisTemplate;
         this.userProfileMapper = userProfileMapper;
+        this.rabbitTemplate = rabbitTemplate;
     }
 
     public RedisUserProfile getUser(Long id) {
@@ -150,7 +155,14 @@ public class CacheAsideService {
             throw new IllegalStateException("用户不存在, userId=" + id);
         }
         log.info("DATABASE UPDATED, userId={}", id);
-        deleteCacheWithRetry(key); // delete redis
+        try {
+            deleteCacheWithRetry(key);
+        } catch (IllegalStateException e) {
+            log.warn("SYNC CACHE INVALIDATION FAILED, SEND MQ, key={}", key);
+            CacheInvalidationMessage message = new CacheInvalidationMessage(key);
+            rabbitTemplate.convertAndSend(RabbitMqConfig.CACHE_INVALIDATION_QUEUE, message);
+            log.info("CACHE INVALIDATION MESSAGE SENT, key={}", key);
+        } // delete redis
 
         // 模拟 Redis 缓存删除失败
         // log.info("DATABASE UPDATED, userId={}", id);
@@ -167,10 +179,10 @@ public class CacheAsideService {
                     log.error("SIMULATED CACHE DELETE FAILURE, key={}, attempt={}", key, attempt);
                     throw new IllegalStateException("模拟第一次 Redis 删除失败");
                 }*/
-                /*if (attempt <= 3) {
+                if (attempt <= 3) {
                     log.error("SIMULATED CACHE DELETE FAILURE, key={}, attempt={}", key, attempt);
                     throw new IllegalStateException("模拟 Redis 删除失败, attempt=" + attempt);
-                }*/
+                }
                 Boolean deleted = objectRedisTemplate.delete(key);
                 log.info("CACHE INVALIDATED, key={}, existed={}, attempt={}",
                         key,
