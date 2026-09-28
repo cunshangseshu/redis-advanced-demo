@@ -160,7 +160,11 @@ public class CacheAsideService {
         } catch (IllegalStateException e) {
             log.warn("SYNC CACHE INVALIDATION FAILED, SEND MQ, key={}", key);
             CacheInvalidationMessage message = new CacheInvalidationMessage(key);
-            rabbitTemplate.convertAndSend(RabbitMqConfig.CACHE_INVALIDATION_QUEUE, message);
+            rabbitTemplate.convertAndSend(
+                    RabbitMqConfig.CACHE_INVALIDATION_EXCHANGE,
+                    RabbitMqConfig.CACHE_INVALIDATION_ROUTING_KEY,
+                    message
+            );
             log.info("CACHE INVALIDATION MESSAGE SENT, key={}", key);
         } // delete redis
 

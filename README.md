@@ -42,7 +42,8 @@ redis-advanced-demo
 │       │   │   ├── RedisConfig.java
 │       │   │   ├── RabbitMqConfig.java
 │       │   │   └── mq
-│       │   │       └── CacheInvalidationConsumer.java
+│       │   │       ├── CacheInvalidationConsumer.java
+│       │   │       └── RabbitMqPublishConfig.java
 │       │   ├── controller
 │       │   │   └── RedisFoundationController.java
 │       │   ├── entity
@@ -182,7 +183,7 @@ Actuator 当前开放：
 | RedisTemplate / StringRedisTemplate / Serializer | ✅ |
 | Cache Aside | ✅ |
 | 缓存穿透 / 击穿 / 雪崩 | ✅ |
-| Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步重试 + RabbitMQ 异步补偿 + Consumer Retry + Error Queue 已完成；最终兜底待实现） |
+| Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步重试 + RabbitMQ 异步补偿 + Consumer Retry + Error Queue + Publisher Confirm / Return 已完成；最终兜底待实现） |
 | 分布式锁 | ⏳ |
 | Lua / MULTI / EXEC / WATCH | ⏳ |
 | RDB / AOF | ⏳ |
@@ -2907,13 +2908,14 @@ Consumer Retry（最多 3 次）✅
 正常 Exchange / Queue / Binding 显式声明 ✅
 Error Exchange / Error Queue / Binding ✅
 RepublishMessageRecoverer 失败消息重新发布 ✅
+Publisher Confirm ACK 验证 ✅
+Publisher Return / NO_ROUTE 验证 ✅
 ```
 
 当前尚未实现：
 
 ```text
 Error Queue 中失败消息的后续自动处理
-Publisher Confirm / Return
 失败任务持久化
 定时任务最终兜底
 更完整的最终一致性机制
@@ -3280,6 +3282,197 @@ RabbitMQ Broker 原生 DLX / DLQ
 
 ---
 
+
+## Publisher Confirm 与 Publisher Return
+
+为了继续补强 Producer → RabbitMQ Broker 之间的可靠性验证，当前项目已经开启 Publisher Confirm 与 Publisher Return。
+
+`application.yml`：
+
+```yaml
+spring:
+  rabbitmq:
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+```
+
+并通过独立配置类：
+
+```text
+config/mq/RabbitMqPublishConfig.java
+```
+
+为 `RabbitTemplate` 注册：
+
+```text
+ConfirmCallback
+ReturnsCallback
+```
+
+---
+
+### Publisher Confirm
+
+Publisher Confirm 用于确认：
+
+```text
+Producer 发出的消息
+↓
+RabbitMQ Broker 是否已经接收
+```
+
+当前正常发送缓存失效消息后，日志已经实际出现：
+
+```text
+MQ PUBLISH CONFIRMED
+```
+
+因此可以确认：
+
+```text
+Producer 调用 RabbitTemplate
+↓
+Broker 成功接收消息
+↓
+Confirm ACK
+```
+
+需要注意：
+
+```text
+Confirm ACK
+≠
+消息一定成功进入目标 Queue
+```
+
+Confirm 只说明 Broker 已经接收到这条消息。
+
+当前日志中：
+
+```text
+correlationData=null
+```
+
+是因为当前发送消息时还没有显式传入 `CorrelationData`，不影响本次 Confirm ACK 实验结论。
+
+---
+
+### Publisher Return
+
+Publisher Return 用于处理：
+
+```text
+Exchange 存在
+↓
+消息已经到达 Exchange
+↓
+但是 RoutingKey 找不到匹配的 Binding
+↓
+消息无法进入任何目标 Queue
+```
+
+为了验证 Return，实验中临时将正常 RoutingKey：
+
+```text
+cache.invalidation
+```
+
+故意改为：
+
+```text
+cache.invalidation.wrong
+```
+
+实际日志出现：
+
+```text
+MQ MESSAGE RETURNED
+exchange=cache.invalidation.exchange
+routingKey=cache.invalidation.wrong
+replyCode=312
+replyText=NO_ROUTE
+```
+
+同时仍然出现：
+
+```text
+MQ PUBLISH CONFIRMED
+```
+
+这组实验完整证明：
+
+```text
+Broker 收到消息
+→ Confirm ACK ✅
+
+Exchange 无法根据 RoutingKey 路由到 Queue
+→ Return / NO_ROUTE ✅
+```
+
+因此：
+
+```text
+Confirm
+→ Broker 有没有收到消息
+
+Return
+→ 消息有没有成功从 Exchange 路由到 Queue
+```
+
+两者解决的是不同层级的问题。
+
+实验结束后，RoutingKey 已恢复为：
+
+```text
+RabbitMqConfig.CACHE_INVALIDATION_ROUTING_KEY
+```
+
+正常链路继续保持：
+
+```text
+cache.invalidation.exchange
+↓ routingKey = cache.invalidation
+cache.invalidation.queue
+```
+
+---
+
+### 当前 Producer 可靠性链路
+
+```text
+CacheAsideService
+↓
+RabbitTemplate.convertAndSend(...)
+↓
+cache.invalidation.exchange
+↓
+Publisher Confirm
+├── ACK：Broker 已接收
+└── NACK：Broker 未确认接收
+
+Exchange
+↓
+根据 RoutingKey 路由
+├── 成功：进入 cache.invalidation.queue
+└── 失败：Publisher Return / NO_ROUTE
+```
+
+当前已经能够区分：
+
+```text
+“Java 调用了发送方法”
+和
+“Broker 确认接收到消息”
+和
+“Exchange 成功路由到目标 Queue”
+```
+
+这三件事不是同一件事。
+
+---
+
 ## 当前 RabbitMQ 补偿边界
 
 当前已实现：
@@ -3296,13 +3489,14 @@ Consumer Retry：最多 3 次 ✅
 Error Exchange / Error Queue / Binding ✅
 RepublishMessageRecoverer ✅
 重试耗尽后失败消息进入 Error Queue ✅
+Publisher Confirm ACK ✅
+Publisher Return / NO_ROUTE ✅
 ```
 
 当前还没有实现：
 
 ```text
 Error Queue 消息自动再次补偿
-Publisher Confirm / Return
 失败任务持久化
 定时任务兜底
 ```
@@ -3317,6 +3511,8 @@ MQ 异步补偿
 Consumer Retry
 +
 失败消息隔离
++
+Publisher Confirm / Return
 ```
 
 但最终一致性的完整兜底链路仍在继续完善。
@@ -3427,7 +3623,7 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. Redis + MySQL 缓存一致性：Error Queue 后续补偿 / Publisher Confirm / 失败任务与定时任务兜底
+1. Redis + MySQL 缓存一致性：Error Queue 后续补偿 / 失败任务持久化 / 定时任务最终兜底
 2. TTL 与内存淘汰策略
 3. 分布式锁
 4. Lua
