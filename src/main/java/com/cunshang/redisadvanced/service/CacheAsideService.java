@@ -11,6 +11,9 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.amqp.rabbit.connection.CorrelationData;
+
+import java.util.UUID;
 
 import java.time.Duration;
 import java.util.concurrent.ThreadLocalRandom;
@@ -160,12 +163,19 @@ public class CacheAsideService {
         } catch (IllegalStateException e) {
             log.warn("SYNC CACHE INVALIDATION FAILED, SEND MQ, key={}", key);
             CacheInvalidationMessage message = new CacheInvalidationMessage(key);
+            String messageId = UUID.randomUUID().toString();
+            CorrelationData correlationData = new CorrelationData(messageId);
             rabbitTemplate.convertAndSend(
                     RabbitMqConfig.CACHE_INVALIDATION_EXCHANGE,
                     RabbitMqConfig.CACHE_INVALIDATION_ROUTING_KEY,
-                    message
+                    message, rabbitMessage -> {
+                        rabbitMessage.getMessageProperties().setMessageId(messageId);
+                        rabbitMessage.getMessageProperties().setHeader("bizKey", key);
+                        return rabbitMessage;
+                    },
+                    correlationData
             );
-            log.info("CACHE INVALIDATION MESSAGE SENT, key={}", key);
+            log.info("CACHE INVALIDATION MESSAGE SENT, key={}, messageId={}", key, messageId);
         } // delete redis
 
         // 模拟 Redis 缓存删除失败
@@ -174,28 +184,20 @@ public class CacheAsideService {
         // throw new IllegalStateException("模拟 Redis 缓存删除失败");
     }
 
-
     private void deleteCacheWithRetry(String key) {
         for (int attempt = 1; attempt <= CACHE_DELETE_MAX_ATTEMPTS; attempt++) {
             try {
-                // 模拟第一次 Redis 删除失败
-                /*if (attempt == 1) {
-                    log.error("SIMULATED CACHE DELETE FAILURE, key={}, attempt={}", key, attempt);
-                    throw new IllegalStateException("模拟第一次 Redis 删除失败");
-                }*/
-                if (attempt <= 3) {
-                    log.error("SIMULATED CACHE DELETE FAILURE, key={}, attempt={}", key, attempt);
-                    throw new IllegalStateException("模拟 Redis 删除失败, attempt=" + attempt);
-                }
                 Boolean deleted = objectRedisTemplate.delete(key);
-                log.info("CACHE INVALIDATED, key={}, existed={}, attempt={}",
+                log.info(
+                        "CACHE INVALIDATED, key={}, existed={}, attempt={}",
                         key,
                         deleted,
                         attempt
                 );
                 return;
             } catch (Exception e) {
-                log.warn("CACHE DELETE FAILED, key={}, attempt={}/{}",
+                log.warn(
+                        "CACHE DELETE FAILED, key={}, attempt={}/{}",
                         key,
                         attempt,
                         CACHE_DELETE_MAX_ATTEMPTS,

@@ -47,21 +47,28 @@ redis-advanced-demo
 │       │   ├── controller
 │       │   │   └── RedisFoundationController.java
 │       │   ├── entity
-│       │   │   └── UserProfile.java
+│       │   │   ├── UserProfile.java
+│       │   │   └── MqPublishFailure.java
 │       │   ├── exception
 │       │   │   ├── BusinessException.java
 │       │   │   └── GlobalExceptionHandler.java
 │       │   ├── mapper
-│       │   │   └── UserProfileMapper.java
+│       │   │   ├── UserProfileMapper.java
+│       │   │   └── MqPublishFailureMapper.java
 │       │   ├── model
 │       │   │   ├── RedisUserProfile.java
 │       │   │   ├── message
 │       │   │   │   └── CacheInvalidationMessage.java
+│       │   │   ├── mq
+│       │   │   │   └── MqRetryCorrelationData.java
 │       │   │   └── request
 │       │   │       └── UpdateUserProfileRequest.java
-│       │   └── service
-│       │       ├── CacheAsideService.java
-│       │       └── RedisFoundationService.java
+│       │   ├── service
+│       │   │   ├── CacheAsideService.java
+│       │   │   ├── MqPublishFailureService.java
+│       │   │   └── RedisFoundationService.java
+│       │   └── task
+│       │       └── MqPublishFailureRetryTask.java
 │       └── resources
 │           └── application.yml
 ├── mysql-data
@@ -183,7 +190,7 @@ Actuator 当前开放：
 | RedisTemplate / StringRedisTemplate / Serializer | ✅ |
 | Cache Aside | ✅ |
 | 缓存穿透 / 击穿 / 雪崩 | ✅ |
-| Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步重试 + RabbitMQ 异步补偿 + Consumer Retry + Error Queue + Publisher Confirm / Return 已完成；最终兜底待实现） |
+| Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步重试 + RabbitMQ 异步补偿 + Consumer Retry + Error Queue + Publisher Confirm / Return + 发布失败持久化 + 定时自动补偿已完成；Error Queue 后续处理仍待实现） |
 | 分布式锁 | ⏳ |
 | Lua / MULTI / EXEC / WATCH | ⏳ |
 | RDB / AOF | ⏳ |
@@ -2910,14 +2917,23 @@ Error Exchange / Error Queue / Binding ✅
 RepublishMessageRecoverer 失败消息重新发布 ✅
 Publisher Confirm ACK 验证 ✅
 Publisher Return / NO_ROUTE 验证 ✅
+CorrelationData messageId 追踪 ✅
+MQ 发布失败任务持久化到 MySQL ✅
+PENDING / SUCCESS / FAILED 状态管理 ✅
+retry_count / next_retry_at 重试控制 ✅
+Spring Scheduling 定时扫描失败任务 ✅
+失败任务自动重新发布 RabbitMQ ✅
+CorrelationData Future 等待真实 Confirm ✅
+Confirm ACK + 无 Return 后自动标记 SUCCESS ✅
+实际验证 NO_ROUTE 失败任务恢复后自动补偿为 SUCCESS ✅
 ```
 
 当前尚未实现：
 
 ```text
 Error Queue 中失败消息的后续自动处理
-失败任务持久化
-定时任务最终兜底
+FAILED 任务的人工处理接口 / 管理页面
+更完整的并发抢占、防重复扫描与多实例调度控制
 更完整的最终一致性机制
 ```
 
@@ -2928,9 +2944,11 @@ Redis + MySQL 缓存一致性
 = 进行中
 ```
 
-当前完整补偿链已经推进到：
+当前已经形成两条可靠性补偿链：
 
 ```text
+【Consumer 处理失败链】
+
 同步删除 Redis 重试仍失败
 ↓
 RabbitMQ 正常 Exchange
@@ -2948,6 +2966,27 @@ RepublishMessageRecoverer
 Error Exchange
 ↓
 cache.invalidation.error.queue
+
+
+【Producer 发布失败链】
+
+RabbitTemplate 发布消息
+↓
+Confirm NACK / Return(NO_ROUTE)
+↓
+mq_publish_failure
+↓
+status = PENDING
+↓
+定时任务扫描
+↓
+自动重新发布
+↓
+等待 Publisher Confirm
+↓
+ACK + 无 Return
+↓
+status = SUCCESS
 ```
 
 > 当前这里使用的是 Spring 应用层的 `RepublishMessageRecoverer` 重新发布失败消息，不是 RabbitMQ Broker 原生的 `Reject → DLX → DLQ` 机制。
@@ -2958,10 +2997,12 @@ cache.invalidation.error.queue
 Error Queue 中仍未完成的缓存失效任务
 ↓
 自动补偿 / 人工补偿
+
+以及进一步完善：
+
+多实例定时任务并发控制
 ↓
-必要时失败任务持久化
-↓
-定时任务最终兜底
+避免同一失败任务被重复扫描 / 重复发送
 ```
 
 ---
@@ -3349,13 +3390,21 @@ Confirm ACK
 
 Confirm 只说明 Broker 已经接收到这条消息。
 
-当前日志中：
+当前主 Producer 发送缓存失效消息时已经显式传入 `CorrelationData`：
 
 ```text
-correlationData=null
+messageId = UUID
 ```
 
-是因为当前发送消息时还没有显式传入 `CorrelationData`，不影响本次 Confirm ACK 实验结论。
+并已验证：
+
+```text
+发送日志中的 messageId
+=
+Publisher Confirm 回调中的 CorrelationData.id
+```
+
+因此现在可以把一次具体的 MQ 发布与对应 Confirm 结果关联起来。
 
 ---
 
@@ -3473,6 +3522,353 @@ Exchange
 
 ---
 
+
+## MQ 发布失败持久化与定时自动补偿
+
+在 Publisher Confirm / Return 已经能够发现发布异常之后，当前项目继续把：
+
+```text
+“发现失败”
+```
+
+升级为：
+
+```text
+“记录失败 → 自动重试 → 判断真实结果 → 更新任务状态”
+```
+
+### 失败任务表
+
+当前新增：
+
+```text
+mq_publish_failure
+```
+
+核心字段包括：
+
+```text
+message_id
+biz_key
+exchange_name
+routing_key
+failure_type
+failure_reason
+retry_count
+status
+next_retry_at
+created_at
+updated_at
+```
+
+当前状态主要使用：
+
+```text
+PENDING
+= 等待自动重试
+
+SUCCESS
+= 自动补偿成功
+
+FAILED
+= 达到最大重试次数后仍失败
+```
+
+失败记录由：
+
+```text
+MqPublishFailureService
+```
+
+负责写入和更新。
+
+---
+
+### 首次发布失败如何落库
+
+当前 Publisher 回调已经接入失败任务持久化。
+
+如果发生：
+
+```text
+Confirm NACK
+```
+
+或者：
+
+```text
+Publisher Return
+replyCode = 312
+replyText = NO_ROUTE
+```
+
+则记录到：
+
+```text
+mq_publish_failure
+```
+
+例如已实际验证：
+
+```text
+biz_key        = user:profile:1001
+exchange_name  = cache.invalidation.exchange
+routing_key    = cache.invalidation.wrong
+failure_type   = RETURN
+failure_reason = 312 NO_ROUTE
+status         = PENDING
+```
+
+这意味着 Producer 发布失败不再只有日志，而是形成可继续处理的数据。
+
+---
+
+### 定时任务自动扫描
+
+当前启动类已开启 Spring Scheduling。
+
+失败任务由：
+
+```text
+MqPublishFailureRetryTask
+```
+
+定期扫描。
+
+核心规则：
+
+```text
+status = PENDING
+retry_count < 最大重试次数
+next_retry_at <= 当前时间
+```
+
+符合条件的任务会被重新读取并再次发送 RabbitMQ。
+
+因此当前定时任务可以先理解为：
+
+```text
+失败任务扫描器
++
+自动补发器
+```
+
+---
+
+### MqRetryCorrelationData
+
+自动补发时使用：
+
+```text
+MqRetryCorrelationData
+```
+
+它继承自：
+
+```text
+CorrelationData
+```
+
+同时保存：
+
+```text
+MQ messageId
++
+数据库 failureTaskId
+```
+
+作用是把：
+
+```text
+“这一次 RabbitMQ 重发”
+```
+
+和：
+
+```text
+“mq_publish_failure 中的哪一条任务”
+```
+
+关联起来。
+
+同时 Retry 消息会带上 `retryTaskId` Header。
+
+这样自动重试消息如果再次 NACK / Return，不会重新 INSERT 一条新的失败任务，而是继续处理原任务，避免失败记录不断重复生成。
+
+---
+
+### 为什么不能在 convertAndSend 返回后直接 SUCCESS
+
+当前自动补偿没有使用：
+
+```text
+convertAndSend() 正常返回
+=
+发送成功
+```
+
+这种错误判断。
+
+因为：
+
+```text
+convertAndSend 正常返回
+```
+
+最多只能说明当前 Java 调用没有立即抛异常，并不能证明：
+
+```text
+Broker Confirm ACK
+```
+
+更不能证明：
+
+```text
+消息成功路由进入 Queue
+```
+
+因此自动补偿会等待：
+
+```java
+correlationData
+        .getFuture()
+        .get(5, TimeUnit.SECONDS);
+```
+
+得到真正的 Publisher Confirm。
+
+然后继续判断：
+
+```text
+Confirm NACK
+→ 重试失败
+
+Confirm ACK
++
+ReturnedMessage != null
+→ 路由失败，重试失败
+
+Confirm ACK
++
+ReturnedMessage == null
+→ 本次补偿成功
+```
+
+最终成功条件为：
+
+```text
+Confirm ACK
++
+没有 Return
+=
+SUCCESS
+```
+
+---
+
+### 自动重试状态流转
+
+当前失败任务状态流：
+
+```text
+首次发布失败
+↓
+PENDING
+↓
+定时任务扫描
+↓
+自动重新发送
+
+├── Confirm NACK
+│      ↓
+│   retry_count + 1
+│
+├── Return / NO_ROUTE
+│      ↓
+│   retry_count + 1
+│
+└── Confirm ACK + 无 Return
+       ↓
+     SUCCESS
+```
+
+如果重试次数尚未达到上限：
+
+```text
+继续 PENDING
++
+设置新的 next_retry_at
+```
+
+达到最大次数仍失败：
+
+```text
+FAILED
+```
+
+---
+
+### 已完成恢复实验
+
+已经实际完成以下实验：
+
+```text
+错误 RoutingKey
+↓
+Publisher Return
+↓
+312 NO_ROUTE
+↓
+失败任务写入 mq_publish_failure
+↓
+status = PENDING
+```
+
+随后修复失败任务的 RoutingKey 为：
+
+```text
+cache.invalidation
+```
+
+并让定时任务自动扫描。
+
+最终：
+
+```text
+自动重发
+↓
+Publisher Confirm ACK
+↓
+无 Return
+↓
+markSuccess()
+↓
+status = SUCCESS
+```
+
+数据库已经实际验证失败任务从待补偿状态恢复为：
+
+```text
+SUCCESS
+```
+
+说明当前 Producer 发布失败的：
+
+```text
+发现
+→ 持久化
+→ 自动扫描
+→ 自动补发
+→ Confirm / Return 判定
+→ 成功闭环
+```
+
+已经实际跑通。
+
+> 当前成功记录仍可能保留最初的 `failure_reason` 或旧 `next_retry_at` 历史值；这不影响本次 SUCCESS 验收，后续可按数据语义决定成功时清空或保留作为历史信息。
+
+---
+
 ## 当前 RabbitMQ 补偿边界
 
 当前已实现：
@@ -3491,17 +3887,25 @@ RepublishMessageRecoverer ✅
 重试耗尽后失败消息进入 Error Queue ✅
 Publisher Confirm ACK ✅
 Publisher Return / NO_ROUTE ✅
+CorrelationData messageId 追踪 ✅
+MQ 发布失败持久化 ✅
+定时扫描 PENDING 失败任务 ✅
+失败任务自动重新发布 ✅
+CorrelationData Future 等待 Confirm ✅
+Confirm / Return 联合判定重试结果 ✅
+PENDING / SUCCESS / FAILED 状态流转 ✅
+失败任务恢复后自动标记 SUCCESS ✅
 ```
 
 当前还没有实现：
 
 ```text
 Error Queue 消息自动再次补偿
-失败任务持久化
-定时任务兜底
+FAILED 任务人工处理接口
+多实例调度下的任务抢占 / 防重复扫描
 ```
 
-因此当前方案已经从“异步补偿第一阶段”推进到：
+因此当前方案已经推进到：
 
 ```text
 同步补偿
@@ -3513,9 +3917,13 @@ Consumer Retry
 失败消息隔离
 +
 Publisher Confirm / Return
++
+Producer 发布失败持久化
++
+定时自动补偿
 ```
 
-但最终一致性的完整兜底链路仍在继续完善。
+Producer 发布侧的自动兜底闭环已经跑通；Consumer Error Queue 的后续处理仍待继续完善。
 
 ---
 
@@ -3623,7 +4031,7 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. Redis + MySQL 缓存一致性：Error Queue 后续补偿 / 失败任务持久化 / 定时任务最终兜底
+1. Redis + MySQL 缓存一致性：Error Queue 后续补偿 / FAILED 人工处理 / 多实例补偿任务并发控制
 2. TTL 与内存淘汰策略
 3. 分布式锁
 4. Lua
