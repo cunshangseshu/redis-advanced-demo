@@ -2,6 +2,7 @@ package com.cunshang.redisadvanced.config.mq;
 
 import com.cunshang.redisadvanced.config.RabbitMqConfig;
 import com.cunshang.redisadvanced.model.message.CacheInvalidationMessage;
+import lombok.Getter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -9,15 +10,14 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
 
+@Getter
 @Component
 public class CacheInvalidationConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(CacheInvalidationConsumer.class);
     private final RedisTemplate<String, Object> objectRedisTemplate;
 
-    public CacheInvalidationConsumer(
-            @Qualifier("objectRedisTemplate") RedisTemplate<String, Object> objectRedisTemplate
-    ) {
+    public CacheInvalidationConsumer(@Qualifier("objectRedisTemplate") RedisTemplate<String, Object> objectRedisTemplate) {
         this.objectRedisTemplate = objectRedisTemplate;
     }
 
@@ -32,7 +32,4 @@ public class CacheInvalidationConsumer {
         // log.info(" , key={}, existed={}", key, deleted);
     }
 
-    public RedisTemplate<String, Object> getObjectRedisTemplate() {
-        return objectRedisTemplate;
-    }
 }

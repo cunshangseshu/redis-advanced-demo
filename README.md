@@ -43,18 +43,21 @@ redis-advanced-demo
 │       │   │   ├── RabbitMqConfig.java
 │       │   │   └── mq
 │       │   │       ├── CacheInvalidationConsumer.java
+│       │   │       ├── CacheInvalidationErrorConsumer.java
 │       │   │       └── RabbitMqPublishConfig.java
 │       │   ├── controller
 │       │   │   └── RedisFoundationController.java
 │       │   ├── entity
 │       │   │   ├── UserProfile.java
-│       │   │   └── MqPublishFailure.java
+│       │   │   ├── MqPublishFailure.java
+│       │   │   └── MqConsumeFailure.java
 │       │   ├── exception
 │       │   │   ├── BusinessException.java
 │       │   │   └── GlobalExceptionHandler.java
 │       │   ├── mapper
 │       │   │   ├── UserProfileMapper.java
-│       │   │   └── MqPublishFailureMapper.java
+│       │   │   ├── MqPublishFailureMapper.java
+│       │   │   └── MqConsumeFailureMapper.java
 │       │   ├── model
 │       │   │   ├── RedisUserProfile.java
 │       │   │   ├── message
@@ -66,6 +69,7 @@ redis-advanced-demo
 │       │   ├── service
 │       │   │   ├── CacheAsideService.java
 │       │   │   ├── MqPublishFailureService.java
+│       │   │   ├── MqConsumeFailureService.java
 │       │   │   └── RedisFoundationService.java
 │       │   └── task
 │       │       └── MqPublishFailureRetryTask.java
@@ -2926,13 +2930,18 @@ Spring Scheduling 定时扫描失败任务 ✅
 CorrelationData Future 等待真实 Confirm ✅
 Confirm ACK + 无 Return 后自动标记 SUCCESS ✅
 实际验证 NO_ROUTE 失败任务恢复后自动补偿为 SUCCESS ✅
+Consumer Retry 耗尽后进入 Error Exchange / Error Queue ✅
+CacheInvalidationErrorConsumer 消费 Error Queue ✅
+mq_consume_failure 消费失败记录持久化 ✅
+实际验证 Consumer 连续失败 3 次后写入 PENDING 记录 ✅
 ```
 
 当前尚未实现：
 
 ```text
-Error Queue 中失败消息的后续自动处理
-FAILED 任务的人工处理接口 / 管理页面
+mq_consume_failure 的自动再次补偿
+mq_consume_failure / mq_publish_failure 的人工处理接口或管理页面
+FAILED 任务的人工处理流程
 更完整的并发抢占、防重复扫描与多实例调度控制
 更完整的最终一致性机制
 ```
@@ -2955,7 +2964,7 @@ RabbitMQ 正常 Exchange
 ↓
 cache.invalidation.queue
 ↓
-Consumer 处理消息
+CacheInvalidationConsumer
 ↓
 Consumer 最多尝试 3 次
 ↓
@@ -2963,9 +2972,15 @@ Consumer 最多尝试 3 次
 ↓
 RepublishMessageRecoverer
 ↓
-Error Exchange
+cache.invalidation.error.exchange
 ↓
 cache.invalidation.error.queue
+↓
+CacheInvalidationErrorConsumer
+↓
+mq_consume_failure
+↓
+status = PENDING
 
 
 【Producer 发布失败链】
@@ -2994,14 +3009,14 @@ status = SUCCESS
 下一阶段继续处理：
 
 ```text
-Error Queue 中仍未完成的缓存失效任务
+mq_consume_failure 中的 PENDING 任务
 ↓
-自动补偿 / 人工补偿
+自动再次补偿 / 人工补偿
 
 以及进一步完善：
 
+FAILED 任务人工处理
 多实例定时任务并发控制
-↓
 避免同一失败任务被重复扫描 / 重复发送
 ```
 
@@ -3869,6 +3884,261 @@ SUCCESS
 
 ---
 
+
+## Consumer Retry 耗尽后的 Error Queue 持久化
+
+当前 Consumer 失败链已经继续向后补齐。
+
+当主 Consumer：
+
+```text
+CacheInvalidationConsumer
+```
+
+连续处理失败，并达到：
+
+```text
+maxAttempts = 3
+```
+
+后，`RepublishMessageRecoverer` 会把失败消息重新发布到：
+
+```text
+cache.invalidation.error.exchange
+```
+
+使用：
+
+```text
+routingKey = cache.invalidation.error
+```
+
+最终进入：
+
+```text
+cache.invalidation.error.queue
+```
+
+当前已经新增：
+
+```text
+CacheInvalidationErrorConsumer
+```
+
+专门消费 Error Queue。
+
+处理流程：
+
+```text
+主 Consumer 失败
+↓
+Retry ×3
+↓
+RepublishMessageRecoverer
+↓
+Error Exchange
+↓
+Error Queue
+↓
+CacheInvalidationErrorConsumer
+↓
+MqConsumeFailureService
+↓
+mq_consume_failure
+```
+
+### Consumer 失败任务表
+
+当前新增：
+
+```text
+mq_consume_failure
+```
+
+用于保存已经经过 Consumer Retry 仍然无法成功处理的业务任务。
+
+核心字段：
+
+```text
+id
+biz_key
+failure_reason
+status
+created_at
+updated_at
+```
+
+当前写入状态：
+
+```text
+PENDING
+```
+
+表示：
+
+```text
+该任务已经从 RabbitMQ Error Queue 中被隔离并持久化
+但后续自动补偿 / 人工处理还没有继续实现
+```
+
+---
+
+### 已完成实际验收
+
+本次通过 RabbitMQ Management 主动向：
+
+```text
+cache.invalidation.exchange
+```
+
+发布：
+
+```json
+{
+  "key": "user:profile:1001"
+}
+```
+
+并使用：
+
+```text
+routingKey = cache.invalidation
+```
+
+主 Consumer 保留教学用模拟异常后，日志实际验证：
+
+```text
+MQ CACHE INVALIDATION RECEIVED
+SIMULATED MQ CONSUMER FAILURE
+```
+
+连续出现 3 次。
+
+随后出现：
+
+```text
+Republishing failed message to exchange
+'cache.invalidation.error.exchange'
+with routing key cache.invalidation.error
+```
+
+Error Consumer 随后实际收到：
+
+```text
+MQ ERROR MESSAGE RECEIVED, key=user:profile:1001
+```
+
+并执行：
+
+```text
+INSERT INTO mq_consume_failure
+```
+
+实际参数包括：
+
+```text
+biz_key        = user:profile:1001
+failure_reason = Consumer retry exhausted
+status         = PENDING
+```
+
+MyBatis 日志：
+
+```text
+Updates: 1
+```
+
+最终：
+
+```text
+MQ CONSUME FAILURE RECORDED, key=user:profile:1001
+```
+
+因此已经实际验证：
+
+```text
+Consumer 连续失败 3 次
+↓
+Error Exchange
+↓
+Error Queue
+↓
+Error Consumer
+↓
+MySQL PENDING 记录
+```
+
+完整跑通。
+
+---
+
+### 关于 mq_publish_failure 的定时空扫日志
+
+验收过程中同时可以看到：
+
+```text
+SELECT ... FROM mq_publish_failure
+WHERE status = 'PENDING'
+...
+Total: 0
+```
+
+这是之前已经实现的 Producer 发布失败自动补偿任务在正常定时扫描：
+
+```text
+MqPublishFailureRetryTask
+```
+
+当前没有待重试 Producer 失败任务，因此：
+
+```text
+Total: 0
+```
+
+属于正常结果，不是异常。
+
+---
+
+### 当前 Consumer 失败链边界
+
+目前已经做到：
+
+```text
+Consumer 处理失败
+↓
+Consumer Retry
+↓
+Retry Exhausted
+↓
+Error Queue
+↓
+失败任务落 MySQL
+```
+
+当前还没有做到：
+
+```text
+mq_consume_failure 自动扫描
+↓
+再次尝试执行缓存失效
+↓
+成功后 SUCCESS
+↓
+达到上限后 FAILED / 人工处理
+```
+
+因此当前 Consumer 侧已经完成：
+
+```text
+失败隔离
++
+失败持久化
+```
+
+但“Consumer 失败任务自动恢复闭环”仍是后续内容。
+
+---
+
 ## 当前 RabbitMQ 补偿边界
 
 当前已实现：
@@ -3895,12 +4165,16 @@ CorrelationData Future 等待 Confirm ✅
 Confirm / Return 联合判定重试结果 ✅
 PENDING / SUCCESS / FAILED 状态流转 ✅
 失败任务恢复后自动标记 SUCCESS ✅
+Consumer Retry 耗尽后进入 Error Queue ✅
+CacheInvalidationErrorConsumer ✅
+mq_consume_failure 失败任务持久化 ✅
+Consumer 失败链实际验收通过 ✅
 ```
 
 当前还没有实现：
 
 ```text
-Error Queue 消息自动再次补偿
+mq_consume_failure 自动再次补偿
 FAILED 任务人工处理接口
 多实例调度下的任务抢占 / 防重复扫描
 ```
@@ -3923,7 +4197,7 @@ Producer 发布失败持久化
 定时自动补偿
 ```
 
-Producer 发布侧的自动兜底闭环已经跑通；Consumer Error Queue 的后续处理仍待继续完善。
+Producer 发布侧的自动兜底闭环已经跑通；Consumer 侧已经完成 Retry Exhausted → Error Queue → MySQL 持久化，后续继续完善 mq_consume_failure 的自动恢复与人工处理。
 
 ---
 
@@ -4031,7 +4305,7 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. Redis + MySQL 缓存一致性：Error Queue 后续补偿 / FAILED 人工处理 / 多实例补偿任务并发控制
+1. Redis + MySQL 缓存一致性：mq_consume_failure 自动补偿 / FAILED 人工处理 / 多实例补偿任务并发控制
 2. TTL 与内存淘汰策略
 3. 分布式锁
 4. Lua
