@@ -72,7 +72,8 @@ redis-advanced-demo
 │       │   │   ├── MqConsumeFailureService.java
 │       │   │   └── RedisFoundationService.java
 │       │   └── task
-│       │       └── MqPublishFailureRetryTask.java
+│       │       ├── MqPublishFailureRetryTask.java
+│       │       └── MqConsumeFailureRetryTask.java
 │       └── resources
 │           └── application.yml
 ├── mysql-data
@@ -194,7 +195,7 @@ Actuator 当前开放：
 | RedisTemplate / StringRedisTemplate / Serializer | ✅ |
 | Cache Aside | ✅ |
 | 缓存穿透 / 击穿 / 雪崩 | ✅ |
-| Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步重试 + RabbitMQ 异步补偿 + Consumer Retry + Error Queue + Publisher Confirm / Return + 发布失败持久化 + 定时自动补偿已完成；Error Queue 后续处理仍待实现） |
+| Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步重试 + RabbitMQ 异步补偿 + Consumer Retry + Error Queue + Publisher Confirm / Return + Producer 发布失败自动补偿 + Consumer 失败任务持久化与定时自动补偿已完成；消息幂等 / ACK-NACK / 多实例并发控制等仍待继续） |
 | 分布式锁 | ⏳ |
 | Lua / MULTI / EXEC / WATCH | ⏳ |
 | RDB / AOF | ⏳ |
@@ -3964,22 +3965,21 @@ id
 biz_key
 failure_reason
 status
+retry_count
+next_retry_at
 created_at
 updated_at
 ```
 
-当前写入状态：
+失败任务首次落库时：
 
 ```text
-PENDING
+status = PENDING
+retry_count = 0
+next_retry_at = 当前时间 + 10 秒
 ```
 
-表示：
-
-```text
-该任务已经从 RabbitMQ Error Queue 中被隔离并持久化
-但后续自动补偿 / 人工处理还没有继续实现
-```
+表示该任务已经从 RabbitMQ Error Queue 中被隔离并持久化，并进入后续定时自动补偿流程。
 
 ---
 
@@ -4099,43 +4099,89 @@ Total: 0
 
 ---
 
-### 当前 Consumer 失败链边界
+### Consumer 失败任务定时自动补偿
 
-目前已经做到：
-
-```text
-Consumer 处理失败
-↓
-Consumer Retry
-↓
-Retry Exhausted
-↓
-Error Queue
-↓
-失败任务落 MySQL
-```
-
-当前还没有做到：
+`mq_consume_failure` 持久化后，当前已经新增：
 
 ```text
-mq_consume_failure 自动扫描
-↓
-再次尝试执行缓存失效
-↓
-成功后 SUCCESS
-↓
-达到上限后 FAILED / 人工处理
+MqConsumeFailureRetryTask
 ```
 
-因此当前 Consumer 侧已经完成：
+定时任务每 5 秒扫描一次可重试任务：
+
+```text
+status = PENDING
+retry_count < 3
+next_retry_at <= 当前时间
+```
+
+找到任务后重新执行：
+
+```text
+Redis DELETE biz_key
+```
+
+业务判断规则：
+
+```text
+delete(key) = true  → Key 被实际删除，补偿成功
+delete(key) = false → Key 本来就不存在，同样达到“旧缓存不存在”的业务目标
+抛出异常            → 本次补偿失败
+```
+
+成功路径已经实际验证：
+
+```text
+PENDING / retry_count=0
+↓
+定时任务扫描
+↓
+Redis DELETE 成功
+↓
+SUCCESS
+↓
+next_retry_at = NULL
+```
+
+失败路径也已经通过停止 Redis 实际验证：
+
+```text
+PENDING / retry_count=0
+↓
+Redis 不可用
+↓
+PENDING / retry_count=1
+↓
+PENDING / retry_count=2
+↓
+FAILED / retry_count=3
+↓
+next_retry_at = NULL
+↓
+停止继续重试
+```
+
+其中 `markSuccess()` 与达到最大重试次数后的 `markRetryFailed()` 使用 `LambdaUpdateWrapper` 显式执行：
+
+```text
+next_retry_at = NULL
+```
+
+这是因为使用 Entity + `updateById()` 时，Java 字段赋值为 `null` 可能会被 MyBatis-Plus 默认更新策略忽略。
+
+因此当前 Consumer 侧已经形成：
 
 ```text
 失败隔离
 +
 失败持久化
++
+定时自动补偿
++
+SUCCESS / FAILED 状态收口
 ```
 
-但“Consumer 失败任务自动恢复闭环”仍是后续内容。
+当前尚未完成的是消息幂等、ACK / NACK / Requeue、FAILED 人工处理以及多实例定时任务的防重复执行。
 
 ---
 
@@ -4168,15 +4214,23 @@ PENDING / SUCCESS / FAILED 状态流转 ✅
 Consumer Retry 耗尽后进入 Error Queue ✅
 CacheInvalidationErrorConsumer ✅
 mq_consume_failure 失败任务持久化 ✅
-Consumer 失败链实际验收通过 ✅
+MqConsumeFailureRetryTask 定时扫描 ✅
+Consumer 失败任务自动再次执行 Redis 缓存失效 ✅
+PENDING → SUCCESS 成功恢复路径 ✅
+PENDING → retry_count 1 → 2 → 3 → FAILED 失败路径 ✅
+SUCCESS / FAILED 时 next_retry_at = NULL ✅
+FAILED 后停止继续扫描 ✅
+Consumer 自动补偿闭环实际验收通过 ✅
 ```
 
 当前还没有实现：
 
 ```text
-mq_consume_failure 自动再次补偿
+消息幂等 / 重复消费治理
+ACK / NACK / Requeue 消费确认语义
 FAILED 任务人工处理接口
 多实例调度下的任务抢占 / 防重复扫描
+Outbox Pattern 等更完整的最终一致性机制
 ```
 
 因此当前方案已经推进到：
@@ -4197,7 +4251,7 @@ Producer 发布失败持久化
 定时自动补偿
 ```
 
-Producer 发布侧的自动兜底闭环已经跑通；Consumer 侧已经完成 Retry Exhausted → Error Queue → MySQL 持久化，后续继续完善 mq_consume_failure 的自动恢复与人工处理。
+Producer 发布侧的自动兜底闭环已经跑通；Consumer 侧也已经完成 Retry Exhausted → Error Queue → MySQL 持久化 → 定时自动补偿 → SUCCESS / FAILED 状态收口。下一阶段继续学习消息幂等、重复消费、ACK / NACK / Requeue、多实例并发控制与更完整的最终一致性机制。
 
 ---
 
@@ -4305,7 +4359,7 @@ Java 中怎么调用
 
 后续将在当前项目上继续逐步增加：
 
-1. Redis + MySQL 缓存一致性：mq_consume_failure 自动补偿 / FAILED 人工处理 / 多实例补偿任务并发控制
+1. Redis + MySQL 缓存一致性：消息幂等 / 重复消费 / ACK-NACK-Requeue / FAILED 人工处理 / 多实例补偿任务并发控制 / Outbox Pattern
 2. TTL 与内存淘汰策略
 3. 分布式锁
 4. Lua
