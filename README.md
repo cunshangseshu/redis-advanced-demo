@@ -194,9 +194,9 @@ Actuator 当前开放：
 | RedisTemplate / StringRedisTemplate / Serializer | ✅ |
 | Cache Aside | ✅ |
 | 缓存穿透 / 击穿 / 雪崩 | ✅ |
-| Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步重试 + RabbitMQ 异步补偿 + Consumer Retry + Error Queue + Publisher Confirm / Return + 发布失败持久化 + 定时自动补偿已完成；Error Queue 后续处理仍待实现） |
-| 分布式锁 | ⏳（已完成 UUID Token / StringRedisTemplate / 所有权校验；Lua 原子释放与 Redisson 待学） |
-| Lua / MULTI / EXEC / WATCH | ⏳ |
+| Redis + MySQL 缓存一致性 | ⏳（已完成：Cache Aside 写路径、Redis 同步删除重试、RabbitMQ 异步补偿、Publisher Confirm / Return、Producer 失败落库与定时补发、Consumer Retry → Error Queue → 失败落库；待完成：Consumer 失败任务定时自动补偿、FAILED 人工处理） |
+| 分布式锁 | ⏳（第 1 节原理 ✅；第 2 节 SET NX + TTL、StringRedisTemplate、UUID 唯一 Token、解锁前所有权检查 ✅；第 3 节 Lua 原子解锁待完成，Redisson 待学） |
+| Lua / MULTI / EXEC / WATCH | ⏳（下一节：Lua 原子解锁；Redis 事务 MULTI / EXEC / WATCH 后续学习） |
 | RDB / AOF | ⏳ |
 | 主从复制 | ⏳ |
 | Sentinel | ⏳ |
