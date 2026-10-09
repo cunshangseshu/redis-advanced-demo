@@ -148,10 +148,10 @@ SELECT * FROM user_profile;
 
 ### 4. 启动 Spring Boot
 
-应用默认端口：
+应用默认端口（以 `src/main/resources/application.yml` 为准）：
 
 ```text
-8080
+8088
 ```
 
 中间件 / 数据源连接：
@@ -195,7 +195,7 @@ Actuator 当前开放：
 | Cache Aside | ✅ |
 | 缓存穿透 / 击穿 / 雪崩 | ✅ |
 | Redis + MySQL 缓存一致性 | ⏳（写路径 + 同步重试 + RabbitMQ 异步补偿 + Consumer Retry + Error Queue + Publisher Confirm / Return + 发布失败持久化 + 定时自动补偿已完成；Error Queue 后续处理仍待实现） |
-| 分布式锁 | ⏳ |
+| 分布式锁 | ⏳（已完成 UUID Token / StringRedisTemplate / 所有权校验；Lua 原子释放与 Redisson 待学） |
 | Lua / MULTI / EXEC / WATCH | ⏳ |
 | RDB / AOF | ⏳ |
 | 主从复制 | ⏳ |
@@ -2316,30 +2316,27 @@ CACHE REBUILD    ≈ 20 次
 
 说明同一个热点 Key 失效后，多个并发请求同时回源 MySQL。
 
-### 当前实现：Redis Mutex
+### 当前实现：Redis Mutex + UUID Token
 
-项目使用 Redis `SET NX + TTL` 思路实现教学版互斥锁：
+项目最初通过 `SET NX + TTL` 和固定 Value `LOCK` 实现教学版缓存重建锁。当前已升级为使用 `StringRedisTemplate` 保存唯一 UUID Token：
 
 ```java
-private boolean tryLock(String lockKey) {
-
-    Boolean success =
-            objectRedisTemplate.opsForValue()
-                    .setIfAbsent(
-                            lockKey,
-                            "LOCK",
-                            LOCK_TTL
-                    );
-
-    return Boolean.TRUE.equals(success);
+private String tryLock(String lockKey) {
+    String token = UUID.randomUUID().toString();
+    Boolean success = stringRedisTemplate.opsForValue().setIfAbsent(lockKey, token, LOCK_TTL);
+    return Boolean.TRUE.equals(success) ? token : null;
 }
 ```
 
-概念上对应：
+概念上对应（`<UUID_TOKEN>` 代表当前请求生成的唯一标识）：
 
 ```redis
-SET lock:user:profile:1001 LOCK NX EX 10
+SET lock:user:profile:1001 <UUID_TOKEN> NX EX 10
 ```
+
+- 抢锁成功：返回当前请求的 Token；抢锁失败：返回 `null`。
+- `getUser()` 使用 `while ((lockToken = tryLock(lockKey)) == null)` 等待，并在 `finally` 调用 `unlock(lockKey, lockToken)`。
+- 锁的 Key / Value 都采用字符串序列化，避免与业务对象缓存的 JSON 序列化混淆。
 
 作用：
 
@@ -2425,38 +2422,29 @@ Thread.sleep(500);
 
 该代码仅用于复现缓存击穿，验收后应删除，不属于正式业务逻辑。
 
-### 当前锁实现的边界
+### 当前锁实现的边界（分布式锁学习阶段）
 
-当前 `unlock()` 为教学版实现：
+当前已实现：`StringRedisTemplate` + UUID Token + 释放前的所有权校验：
 
 ```java
-objectRedisTemplate.delete(lockKey);
+private void unlock(String lockKey, String token) {
+    String currentToken = stringRedisTemplate.opsForValue().get(lockKey);
+    if (token.equals(currentToken)) {
+        stringRedisTemplate.delete(lockKey);
+    }
+}
 ```
 
-目前还没有解决：
+相较最初直接执行 `objectRedisTemplate.delete(lockKey)`，现在会先判断锁是否属于当前请求；**但 `GET` 与 `DELETE` 是两条独立命令，仍然存在竞态条件**：校验后锁过期，其他请求拿到新锁，旧请求可能误删新锁。
+
+本阶段仅完成代码改造，**尚未完成这部分的专项编译 / 并发验收**。后续学习计划：
 
 ```text
-锁超时
-↓
-其他线程获得新锁
-↓
-旧线程执行结束
-↓
-误删其他线程持有的锁
+Lua 原子校验并删除（下一节）
+→ Redisson / Watchdog / 可重入锁（后续）
 ```
 
-该问题不会在缓存击穿章节提前展开。
-
-后续分布式锁专项会继续学习：
-
-```text
-唯一锁 Value
-→ 锁所有权
-→ Lua 原子校验并删除
-→ Redisson
-→ Watchdog
-→ 可重入锁
-```
+在 Lua 原子解锁前，当前实现仍属于教学过渡版本，不应作为生产级分布式锁使用。
 
 ---
 
@@ -3887,6 +3875,8 @@ SUCCESS
 
 ## Consumer Retry 耗尽后的 Error Queue 持久化
 
+> **历史验收记录：** 本节的 `SIMULATED MQ CONSUMER FAILURE` 来自此前故意抛异常的教学实验，用于验证 Consumer Retry → Error Queue → 失败落库。当前 `master` 已恢复 `CacheInvalidationConsumer.consume()` 的正常业务逻辑：接收消息后调用 `objectRedisTemplate.delete(key)`，并记录 `MQ CACHE INVALIDATION SUCCESS` 日志；不再主动抛出模拟异常。只有真实消费失败时才会触发既有重试与失败转发机制。
+
 当前 Consumer 失败链已经继续向后补齐。
 
 当主 Consumer：
@@ -4141,6 +4131,8 @@ mq_consume_failure 自动扫描
 
 ## 当前 RabbitMQ 补偿边界
 
+主分支当前状态：普通缓存失效消息由 Consumer 正常删除 Redis Key；此前异常模拟仅为失败链路验收。`mq_consume_failure` 的定时自动恢复来自另一个尚未合并到 `master` 的独立开发分支，不应当作当前主分支已实现功能。
+
 当前已实现：
 
 ```text
@@ -4307,8 +4299,8 @@ Java 中怎么调用
 
 1. Redis + MySQL 缓存一致性：mq_consume_failure 自动补偿 / FAILED 人工处理 / 多实例补偿任务并发控制
 2. TTL 与内存淘汰策略
-3. 分布式锁
-4. Lua
+3. Redis 分布式锁：已完成 UUID Token 与锁所有权校验，下一步为 Lua 原子解锁，再了解 Redisson
+4. Lua：将锁所有权比较与删除放入同一原子脚本
 5. MULTI / EXEC / WATCH
 6. RDB / AOF
 7. 主从复制

@@ -8,8 +8,10 @@ import com.cunshang.redisadvanced.model.message.CacheInvalidationMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 
@@ -33,11 +35,13 @@ public class CacheAsideService {
     private static final int CACHE_DELETE_MAX_ATTEMPTS = 3;
     private static final long CACHE_DELETE_RETRY_DELAY_MS = 200;
     private final RabbitTemplate rabbitTemplate;
+    private final StringRedisTemplate stringRedisTemplate;
 
-    public CacheAsideService(@Qualifier("objectRedisTemplate") RedisTemplate<String, Object> objectRedisTemplate, UserProfileMapper userProfileMapper, RabbitTemplate rabbitTemplate) {
+    public CacheAsideService(@Qualifier("objectRedisTemplate") RedisTemplate<String, Object> objectRedisTemplate, UserProfileMapper userProfileMapper, RabbitTemplate rabbitTemplate, StringRedisTemplate stringRedisTemplate) {
         this.objectRedisTemplate = objectRedisTemplate;
         this.userProfileMapper = userProfileMapper;
         this.rabbitTemplate = rabbitTemplate;
+        this.stringRedisTemplate = stringRedisTemplate;
     }
 
     public RedisUserProfile getUser(Long id) {
@@ -58,7 +62,8 @@ public class CacheAsideService {
         }
         log.info("CACHE MISS, key={}", key);
         // 2. 没抢到锁的线程等待
-        while (!tryLock(lockKey)) {
+        String lockToken;
+        while ((lockToken = tryLock(lockKey)) == null) {
             try {
                 Thread.sleep(50);
             } catch (InterruptedException e) {
@@ -115,7 +120,7 @@ public class CacheAsideService {
             return profile;
         } finally {
             // 7. 无论成功还是异常都释放锁
-            unlock(lockKey);
+            unlock(lockKey, lockToken);
             log.info("LOCK RELEASED, lockKey={}", lockKey);
         }
     }
@@ -124,9 +129,10 @@ public class CacheAsideService {
      * 尝试获取缓存重建锁。
      * redis的cli语句对应的是：SET lock:user:profile:1001 LOCK NX EX 10
      */
-    private boolean tryLock(String lockKey) {
-        Boolean success = objectRedisTemplate.opsForValue().setIfAbsent(lockKey, "LOCK", LOCK_TTL);
-        return Boolean.TRUE.equals(success);
+    private String tryLock(String lockKey) {
+        String token = UUID.randomUUID().toString();
+        Boolean success = stringRedisTemplate.opsForValue().setIfAbsent(lockKey, token, LOCK_TTL);
+        return Boolean.TRUE.equals(success) ? token : null;
     }
 
     /**
@@ -136,8 +142,11 @@ public class CacheAsideService {
      * 后续分布式锁章节会升级为：
      * 唯一锁标识 + Lua 原子释放 / Redisson。
      */
-    private void unlock(String lockKey) {
-        objectRedisTemplate.delete(lockKey);
+    private void unlock(String lockKey, String token) {
+        String currentToken = stringRedisTemplate.opsForValue().get(lockKey);
+        if (token.equals(currentToken)) {
+            stringRedisTemplate.delete(lockKey);
+        }
     }
 
     private Duration buildCacheTtl() {
