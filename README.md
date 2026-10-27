@@ -195,8 +195,8 @@ Actuator 当前开放：
 | Cache Aside | ✅ |
 | 缓存穿透 / 击穿 / 雪崩 | ✅ |
 | Redis + MySQL 缓存一致性 | ⏳（已完成：Cache Aside 写路径、Redis 同步删除重试、RabbitMQ 异步补偿、Publisher Confirm / Return、Producer 失败落库与定时补发、Consumer Retry → Error Queue → 失败落库；待完成：Consumer 失败任务定时自动补偿、FAILED 人工处理） |
-| 分布式锁 | ⏳（第 1 节原理 ✅；第 2 节 SET NX + TTL、StringRedisTemplate、UUID 唯一 Token、解锁前所有权检查 ✅；第 3 节 Lua 原子解锁待完成，Redisson 待学） |
-| Lua / MULTI / EXEC / WATCH | ⏳（下一节：Lua 原子解锁；Redis 事务 MULTI / EXEC / WATCH 后续学习） |
+| 分布式锁 | ⏳（原理、SET NX + TTL、StringRedisTemplate、UUID Token、Lua 原子解锁代码已完成 ✅；已通过 Redis CLI 同等脚本逻辑测试；Spring Boot 真实链路及并发验收待完成，Redisson 待学） |
+| Lua / MULTI / EXEC / WATCH | ⏳（Lua 原子解锁脚本与 Java 调用已实现 ✅；应用联调待验证；MULTI / EXEC / WATCH 后续学习） |
 | RDB / AOF | ⏳ |
 | 主从复制 | ⏳ |
 | Sentinel | ⏳ |
@@ -2316,7 +2316,7 @@ CACHE REBUILD    ≈ 20 次
 
 说明同一个热点 Key 失效后，多个并发请求同时回源 MySQL。
 
-### 当前实现：Redis Mutex + UUID Token
+### 当前实现：Redis Mutex + UUID Token + Lua 原子解锁
 
 项目最初通过 `SET NX + TTL` 和固定 Value `LOCK` 实现教学版缓存重建锁。当前已升级为使用 `StringRedisTemplate` 保存唯一 UUID Token：
 
@@ -2384,9 +2384,9 @@ SET lock:user:profile:1001 <UUID_TOKEN> NX EX 10
 
 避免线程 B 再次无意义查询数据库。
 
-### JMeter 优化后验证
+### JMeter 优化后验证（历史实验）
 
-使用完全相同的 20 并发测试条件，实际日志结果：
+以下结果来自此前 Mutex + Double Check 的测试，**不是本次 Lua 改造后的并发验收**。使用完全相同的 20 并发测试条件，实际日志结果：
 
 ```text
 CACHE MISS              = 20 次
@@ -2422,29 +2422,45 @@ Thread.sleep(500);
 
 该代码仅用于复现缓存击穿，验收后应删除，不属于正式业务逻辑。
 
-### 当前锁实现的边界（分布式锁学习阶段）
+### 当前锁实现与边界（Lua 原子解锁）
 
-当前已实现：`StringRedisTemplate` + UUID Token + 释放前的所有权校验：
+当前已实现 `StringRedisTemplate` + UUID Token + Lua 原子校验并删除，替代此前非原子的 Java `GET` + `DELETE`。
+
+Lua 脚本位于 `src/main/resources/lua/unlock.lua`：
+
+```lua
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+
+return 0
+```
+
+`CacheAsideService` 使用 `DefaultRedisScript<Long>` 加载脚本：
 
 ```java
-private void unlock(String lockKey, String token) {
-    String currentToken = stringRedisTemplate.opsForValue().get(lockKey);
-    if (token.equals(currentToken)) {
-        stringRedisTemplate.delete(lockKey);
-    }
+private boolean unlock(String lockKey, String token) {
+    Long result = stringRedisTemplate.execute(
+            UNLOCK_SCRIPT,
+            List.of(lockKey),
+            token
+    );
+    return Long.valueOf(1L).equals(result);
 }
 ```
 
-相较最初直接执行 `objectRedisTemplate.delete(lockKey)`，现在会先判断锁是否属于当前请求；**但 `GET` 与 `DELETE` 是两条独立命令，仍然存在竞态条件**：校验后锁过期，其他请求拿到新锁，旧请求可能误删新锁。
+在 `getUser()` 的 `finally` 中调用并记录真实结果：
 
-本阶段仅完成代码改造，**尚未完成这部分的专项编译 / 并发验收**。后续学习计划：
-
-```text
-Lua 原子校验并删除（下一节）
-→ Redisson / Watchdog / 可重入锁（后续）
+```java
+boolean released = unlock(lockKey, lockToken);
+log.info("LOCK RELEASE RESULT, lockKey={}, released={}", lockKey, released);
 ```
 
-在 Lua 原子解锁前，当前实现仍属于教学过渡版本，不应作为生产级分布式锁使用。
+- `KEYS[1]`：锁 Key；`ARGV[1]`：当前请求的 UUID Token。
+- 返回 `1`：Token 匹配，成功删除自己的锁；返回 `0`：没有删除。
+- 已用 Redis CLI 对等效 Lua 逻辑进行验证：错误 Token 返回 `0` 且 Key 保留；正确 Token 返回 `1` 且 Key 被删除。
+- **尚未完成** Spring Boot 真实调用链、编译与 Lua 改造后的并发专项验收；上述 JMeter 数据属于历史版本。
+- **仍待加强**：锁 TTL 为固定 10 秒，业务执行超时后可能失去锁；尚未实现自动续期、可重入锁等能力，后续学习 Redisson。
 
 ---
 
@@ -4299,8 +4315,8 @@ Java 中怎么调用
 
 1. Redis + MySQL 缓存一致性：mq_consume_failure 自动补偿 / FAILED 人工处理 / 多实例补偿任务并发控制
 2. TTL 与内存淘汰策略
-3. Redis 分布式锁：已完成 UUID Token 与锁所有权校验，下一步为 Lua 原子解锁，再了解 Redisson
-4. Lua：将锁所有权比较与删除放入同一原子脚本
+3. Redis 分布式锁：已完成 UUID Token 与 Lua 原子解锁代码；下一步验证 Spring Boot 解锁链路与并发场景，再学习 Redisson
+4. Lua：已实现校验 Token 与删除 Key 的原子脚本，后续学习其他 Lua 应用
 5. MULTI / EXEC / WATCH
 6. RDB / AOF
 7. 主从复制
